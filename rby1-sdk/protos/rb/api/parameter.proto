@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package rb.api;
+
+import "rb/api/header.proto";
+
+message GetParameterRequest {
+  RequestHeader request_header = 1;
+
+  string name = 2;
+}
+
+message GetParameterResponse {
+  ResponseHeader response_header = 1;
+
+  string parameter = 2;
+}
+
+message SetParameterRequest {
+  RequestHeader request_header = 1;
+
+  string name = 2;
+
+  string parameter = 3;
+}
+
+message SetParameterResponse {
+  ResponseHeader response_header = 1;
+}
+
+message GetParameterListRequest {
+  RequestHeader request_header = 1;
+}
+
+message GetParameterListResponse {
+  ResponseHeader response_header = 1;
+
+  message ParameterType {
+    string name = 1;
+
+    // Type of parameter
+    // 0: int
+    // 1: double
+    // 2: std::string
+    // 3: std::array<double, 3>
+    // 4: std::array<double, 6>
+    // 5: std::array<double, 7>
+    int32 type = 2;
+  }
+
+  repeated ParameterType parameters = 2;
+}
+
+message FactoryResetParameterRequest {
+  RequestHeader request_header = 1;
+
+  string name = 2;
+}
+
+message FactoryResetParameterResponse {
+  ResponseHeader response_header = 1;
+}
+
+message FactoryResetAllParametersRequest {
+  RequestHeader request_header = 1;
+}
+
+message FactoryResetAllParametersResponse {
+  ResponseHeader response_header = 1;
+}
+
+message ResetParameterRequest {
+  RequestHeader request_header = 1;
+
+  string name = 2;
+}
+
+message ResetParameterResponse {
+  ResponseHeader response_header = 1;
+}
+
+message ResetAllParametersRequest {
+  RequestHeader request_header = 1;
+}
+
+message ResetAllParametersResponse {
+  ResponseHeader response_header = 1;
+}
+
+message ResetParameterToDefaultRequest {
+  RequestHeader request_header = 1;
+
+  string name = 2;
+}
+
+message ResetParameterToDefaultResponse {
+  ResponseHeader response_header = 1;
+}
+
+message ResetAllParametersToDefaultRequest {
+  RequestHeader request_header = 1;
+}
+
+message ResetAllParametersToDefaultResponse {
+  ResponseHeader response_header = 1;
+}

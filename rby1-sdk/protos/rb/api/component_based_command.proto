@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package rb.api;
+
+import "rb/api/mobility_command.proto";
+import "rb/api/body_command.proto";
+import "rb/api/head_command.proto";
+import "rb/api/command_header.proto";
+
+message ComponentBasedCommand {
+  message Request {
+    CommandHeader.Request command_header = 1;
+
+    MobilityCommand.Request mobility_command = 2;
+
+    BodyCommand.Request body_command = 3;
+
+    HeadCommand.Request head_command = 4;
+  }
+
+  message Feedback {
+    CommandHeader.Feedback command_header_feedback = 1;
+
+    MobilityCommand.Feedback mobility_command_feedback = 2;
+
+    BodyCommand.Feedback body_command_feedback = 3;
+
+    HeadCommand.Feedback head_command_feedback = 4;
+  }
+}

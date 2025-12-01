@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package rb.api;
+
+import "rb/api/control_manager.proto";
+
+service ControlManagerService {
+  rpc ControlManagerCommand(ControlManagerCommandRequest) returns (ControlManagerCommandResponse) {}
+
+  rpc CancelControl(CancelControlRequest) returns (CancelControlResponse) {}
+
+  rpc GetTimeScale(GetTimeScaleRequest) returns (GetTimeScaleResponse) {}
+
+  rpc SetTimeScale(SetTimeScaleRequest) returns (SetTimeScaleResponse) {}
+
+  rpc WaitForControlReady(WaitForControlReadyRequest) returns (WaitForControlReadyResponse) {}
+}

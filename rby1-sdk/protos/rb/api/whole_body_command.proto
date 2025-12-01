@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package rb.api;
+
+import "rb/api/basic_command.proto";
+import "rb/api/command_header.proto";
+
+message WholeBodyCommand {
+  message Request {
+    CommandHeader.Request command_header = 1;
+
+    oneof command {
+      StopCommand.Request stop_command = 2;
+
+      RealTimeControlCommand.Request real_time_control_command = 3;
+    }
+  }
+
+  message Feedback {
+    CommandHeader.Feedback command_header_feedback = 1;
+
+    oneof feedback {
+      StopCommand.Feedback stop_command_feedback = 2;
+
+      RealTimeControlCommand.Feedback real_time_control_command_feedback = 3;
+    }
+  }
+}

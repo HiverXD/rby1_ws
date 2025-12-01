@@ -1,0 +1,105 @@
+// TODO Plan to be changed
+
+syntax = "proto3";
+
+package rb.api;
+
+import "rb/api/header.proto";
+
+message BatteryInfo {
+
+}
+
+message PowerInfo {
+  string name = 1;
+}
+
+message EMOInfo {
+  string name = 1;
+}
+
+message JointInfo {
+  // Joint Motor Name
+  string name = 1;
+
+  // Whether the joint has a brake
+  bool has_brake = 2;
+
+  // RB or Dynamixel
+  string product_name = 3;
+
+  // Firmware Version Name
+  string firmware_version = 4;
+}
+
+message RobotInfo {
+  string version = 17;
+
+  string sdk_version = 18;
+
+  string robot_model_name = 12;
+
+  string robot_model_version = 16;
+
+  BatteryInfo battery_info = 2;
+
+  repeated PowerInfo power_infos = 3;
+
+  repeated EMOInfo emo_infos = 11;
+
+  int32 degree_of_freedom = 4;
+
+  repeated JointInfo joint_infos = 5;
+
+  repeated uint32 mobility_joint_idx = 6;
+
+  repeated uint32 body_joint_idx = 7;
+
+  repeated uint32 head_joint_idx = 8;
+
+  repeated uint32 torso_joint_idx = 13;
+
+  repeated uint32 right_arm_joint_idx = 14;
+
+  repeated uint32 left_arm_joint_idx = 15;
+
+  // [DEPRECATED] Will be removed in the future. Use `robot_model_name` instead.
+  string robot_version = 1;
+
+  // [DEPRECATED]
+  string sdk_commit_id = 10;
+}
+
+message GetRobotInfoRequest {
+  //
+  RequestHeader request_header = 1;
+}
+
+message GetRobotInfoResponse {
+  //
+  ResponseHeader response_header = 1;
+
+  RobotInfo robot_info = 2;
+}
+
+message GetRobotModelRequest {
+  RequestHeader request_header = 1;
+}
+
+message GetRobotModelResponse {
+  ResponseHeader response_header = 1;
+
+  string model = 2;
+}
+
+message ImportRobotModelRequest {
+  RequestHeader request_header = 1;
+
+  string name = 2;
+
+  string model = 3;
+}
+
+message ImportRobotModelResponse {
+  ResponseHeader response_header = 1;
+}

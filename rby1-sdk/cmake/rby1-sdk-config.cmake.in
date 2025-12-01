@@ -1,0 +1,17 @@
+get_filename_component(RBY1-SDK_CMAKE_DIR "${CMAKE_CURRENT_LIST_FILE}" PATH)
+include(CMakeFindDependencyMacro)
+
+list(APPEND CMAKE_MODULE_PATH ${RBY1-SDK_CMAKE_DIR})
+
+# find_dependency(gRPC REQUIRED)
+# find_dependency(tinyxml2 REQUIRED)
+if (NOT TARGET Eigen3::Eigen)
+    find_dependency(Eigen3 REQUIRED)
+endif ()
+
+
+if (NOT TARGET rby1-sdk::rby1-sdk)
+    include("${RBY1-SDK_CMAKE_DIR}/rby1-sdk-targets.cmake")
+endif ()
+
+set(RBY1_SDK_LIBRARIES rby1-sdk::rby1-sdk)

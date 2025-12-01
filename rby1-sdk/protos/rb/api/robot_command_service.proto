@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package rb.api;
+
+import "rb/api/robot_command.proto";
+
+service RobotCommandService {
+  // In case of sending and receiving a single command
+  rpc RobotCommand(RobotCommandRequest) returns (RobotCommandResponse) {}
+
+  // In case of sending and receiving commands continuously
+  rpc RobotCommandStream(stream RobotCommandRequest) returns (stream RobotCommandResponse) {}
+
+}

@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package rb.api;
+
+message Vec2 {
+  double x = 1;
+  double y = 2;
+}
+
+message Vec3 {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}
+
+message SE2Pose {
+  Vec2 position = 1;    // (m)
+  double angle = 2;     // (rad)
+}
+
+message SE2Velocity {
+  Vec2 linear = 1;    // (m/s)
+  double angular = 2; // (rad/s)
+}
+
+message Quaternion {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double w = 4;
+}
+
+message EulerAngleZYX {
+  double z = 1;
+  double y = 2;
+  double x = 3;
+}
+
+message SE3Pose {
+  Vec3 position = 1; // (m)
+  oneof rotation {
+    Quaternion quaternion = 2;
+    EulerAngleZYX euler = 3;
+  }
+}
+
+message Inertial {
+  // Mass (kg)
+  double mass = 1;
+
+  // Center of mass (m)
+  Vec3 center_of_mass = 2;
+
+  // Inertia tensor
+  Inertia inertia = 3;
+}
+
+// Inertia tensor components (kg*m^2)
+message Inertia {
+  double ixx = 1;
+  double iyy = 2;
+  double izz = 3;
+  double ixy = 4;
+  double ixz = 5;
+  double iyz = 6;
+}

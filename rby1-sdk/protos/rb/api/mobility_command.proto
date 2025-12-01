@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package rb.api;
+
+import "rb/api/command_header.proto";
+import "rb/api/basic_command.proto";
+
+message MobilityCommand {
+  message Request {
+    CommandHeader.Request command_header = 1;
+
+    oneof command {
+      JointVelocityCommand.Request joint_velocity_command = 2;
+
+      SE2VelocityCommand.Request se2_velocity_command = 3;
+    }
+  }
+
+  message Feedback {
+    CommandHeader.Feedback command_header_feedback = 1;
+
+    oneof feedback {
+      JointVelocityCommand.Feedback joint_velocity_command_feedback = 2;
+
+      SE2VelocityCommand.Feedback se2_velocity_command_feedback = 3;
+    }
+  }
+}

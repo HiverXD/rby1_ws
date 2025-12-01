@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package rb.api;
+
+import "rb/api/power.proto";
+
+service PowerService {
+  // Control power of the robot
+  rpc PowerCommand(PowerCommandRequest) returns (PowerCommandResponse) {}
+
+  // Joint command
+  rpc JointCommand(JointCommandRequest) returns (JointCommandResponse) {}
+
+  // Tool Flange
+  rpc ToolFlangePowerCommand(ToolFlangePowerCommandRequest) returns (ToolFlangePowerCommandResponse) {}
+}

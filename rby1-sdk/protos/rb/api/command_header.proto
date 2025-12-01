@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package rb.api;
+
+import "google/protobuf/duration.proto";
+import "rb/api/geometry.proto";
+
+message CommandHeader {
+  message Request {
+    google.protobuf.Duration control_hold_time = 1;
+
+    reserved 2;
+
+    reserved 3;
+  }
+
+  message Feedback {
+    bool finished = 1;
+  }
+}
