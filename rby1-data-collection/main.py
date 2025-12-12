@@ -33,6 +33,10 @@ from rclpy.qos import qos_profile_sensor_data
 import threading
 import subprocess
 import os
+import signal
+import shlex
+import re
+import copy
 
 # MAX_POINT = 2048  # maximum number of points in point cloud
 
@@ -67,33 +71,44 @@ class HeadCamSub(Node):
 
     def color_cb(self, msg: Image):
         arr = rosimg_to_numpy(msg)  # should be HxWx3 uint8
-        with self._lock:
-            self.curr_frame = arr  # store latest
-            self.last_stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-            self._seq += 1
-            self._got_first_color.set()
+        #with self._lock:
+        self.curr_frame = arr  # store latest
+        self.last_stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
+        self._seq += 1
+        self._got_first_color.set()
+        try:
+            # log arrival of a new color frame (seq and composed timestamp)
+            ts = float(self.last_stamp[0]) + float(self.last_stamp[1]) * 1e-9
+            logging.info(f"[HeadCamSub] color frame arrived seq={self._seq} ts={ts:.6f}")
+        except Exception:
+            pass
 
     def depth_cb(self, msg: Image):
         # Depth image is typically uint16 Z16 format
         depth_arr = np.frombuffer(msg.data, dtype=np.uint16)
         depth_arr = depth_arr.reshape((msg.height, msg.width))
-        with self._lock:
-            self.curr_depth = depth_arr
-            self.last_depth_stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-            self._got_first_depth.set()
+        #with self._lock:
+        self.curr_depth = depth_arr
+        self.last_depth_stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
+        self._got_first_depth.set()
+        try:
+            ts = float(self.last_depth_stamp[0]) + float(self.last_depth_stamp[1]) * 1e-9
+            logging.info(f"[HeadCamSub] depth frame arrived ts={ts:.6f}")
+        except Exception:
+            pass
 
     # helper to safely fetch a copy
     def get_frame_copy(self):
-        with self._lock:
-            if self.curr_frame is None:
-                return None, None, None
-            return self.curr_frame.copy(), self.last_stamp, self._seq
+        #with self._lock:
+        if self.curr_frame is None:
+            return None, None, None
+        return copy.deepcopy(self.curr_frame), self.last_stamp, self._seq
     
     def get_depth_copy(self):
-        with self._lock:
-            if self.curr_depth is None:
-                return None, None
-            return self.curr_depth.copy(), self.last_depth_stamp
+        #with self._lock:
+        if self.curr_depth is None:
+            return None, None
+        return copy.deepcopy(self.curr_depth), self.last_depth_stamp
 
 
 logging.basicConfig(
@@ -372,7 +387,11 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
         robot_pos_prev = None
 
         while not stop_event.is_set():
+            # Thread-safe snapshot of latest camera frames
+            frame, frame_stamp, frame_seq = headcam_sub.get_frame_copy()
+            depth, depth_stamp = headcam_sub.get_depth_copy()
             # Robot joint positions - 현재 포지션 읽기
+
             robot_pos = None
             try:
                 if SystemContext.vr_state.joint_positions is not None:
@@ -383,74 +402,11 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             except Exception as e:
                 logging.warning(f"[demo_logger] Failed to read robot position: {e}")
             
-            # robot target positions (Cartesian space) and joint angles (via IK)
-            robot_target_cartesian = np.full(9, np.nan)
 
             # 이전 스텝의 robot_target_joints를 현재 robot_pos로 업데이트
             h5_writer.update_previous_target(robot_pos)
 
             robot_target_joints = robot_pos
-
-            try:
-                right_pose_locked = SystemContext.vr_state.right_hand_locked_pose
-                left_pose_locked = SystemContext.vr_state.left_hand_locked_pose
-                torso_pose_locked = SystemContext.vr_state.torso_locked_pose
-
-                has_right_target = right_pose_locked is not None
-                has_left_target = left_pose_locked is not None
-                has_torso_target = torso_pose_locked is not None
-
-                targets = []
-                positions = []
-
-                if has_right_target:
-                    right_target_pose = np.array(right_pose_locked, dtype=float) @ np.linalg.inv(Settings.T_hand_offset)
-                    targets.append(("base", "link_right_arm_6", right_target_pose))
-                    positions.append(right_target_pose[:3, 3])
-                else:
-                    positions.append([np.nan, np.nan, np.nan])
-
-                if has_left_target:
-                    left_target_pose = np.array(left_pose_locked, dtype=float) @ np.linalg.inv(Settings.T_hand_offset)
-                    targets.append(("base", "link_left_arm_6", left_target_pose))
-                    positions.append(left_target_pose[:3, 3])
-                else:
-                    positions.append([np.nan, np.nan, np.nan])
-
-                if has_torso_target:
-                    torso_target_pose = np.array(torso_pose_locked, dtype=float)
-                    targets.append(("base", "link_torso_5", torso_target_pose))
-                    positions.append(torso_target_pose[:3, 3])
-                else:
-                    positions.append([np.nan, np.nan, np.nan])
-
-                robot_target_cartesian = np.concatenate(positions, axis=0)
-                # if targets and robot_pos is not None:
-                #     try:
-                #         print("[demo_logger] Computing IK with targets:", targets)
-                #         ik_result = dyn_robot.compute_ik(
-                #             targets,
-                #             robot_pos.copy(),
-                #             robot_model.robot_joint_names
-                #         )
-                #         print("[demo_logger] IK result:", ik_result)
-                #         if ik_result.success:
-                #             print("[demo_logger] IK successful, storing target joints", ik_result.joint_position, targets)
-                #             robot_target_joints = ik_result.joint_position
-                #         else:
-                #             logging.debug("[demo_logger] IK failed, storing NaN targets")
-                #             robot_target_joints = np.full_like(robot_pos, np.nan)
-                #     except Exception as ik_error:
-                #         logging.debug(f"[demo_logger] IK computation error: {ik_error}")
-                #         robot_target_joints = np.full_like(robot_pos, np.nan)
-                # else:
-                #     if robot_pos is None:
-                #         logging.debug("[demo_logger] robot_pos unavailable, skipping IK")
-                #     if not targets:
-                #         logging.debug("[demo_logger] No target poses available, skipping IK")
-
-            except Exception as e:
-                logging.warning(f"[demo_logger] Failed to read robot target position: {e}")
 
             # Gripper encoders (actual measured state)
             grip = None
@@ -486,16 +442,17 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 left_arm_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["grip"] > 0.8          
                 left_grip_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["trigger"] > 0.8
 
-            data_collection_bool = (headcam_sub.curr_frame is not None) and (right_arm_pressed or left_arm_pressed or right_grip_pressed or left_grip_pressed)
+            data_collection_bool = (frame is not None) and (right_arm_pressed or left_arm_pressed or right_grip_pressed or left_grip_pressed)
 
             if data_collection_bool:
                 # Generate PCD from RGB-D
                 pcd_points = None
                 pcd_colors = None
-                if headcam_sub.curr_frame is not None and headcam_sub.curr_depth is not None:
+                if frame is not None and depth is not None:
                     try:
-                        rgb_frame = headcam_sub.curr_frame
-                        depth_frame = headcam_sub.curr_depth
+                        rgb_frame = frame
+                        depth_frame = depth
+                        print("camera time stamp : ", frame_stamp)
                         
                         # Determine intrinsics based on depth image size
                         H_d, W_d = depth_frame.shape
@@ -531,7 +488,6 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 h5_writer.put({
                     "ts": time.time(),
                     "robot_position": robot_pos,
-                    "robot_target_cartesian": robot_target_cartesian,
                     "robot_target_joints": robot_target_joints,
                     "gripper_state": grip,
                     "gripper_target": gripper.get_normalized_target() if gripper else None,
@@ -563,9 +519,90 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
 
 
 def start_realsense_camera():
-    """Start RealSense ROS2 camera node in a subprocess"""
+    """Stop existing ROS nodes/topics that may publish camera data, then start the
+    RealSense ROS2 camera launch in a subprocess. This function attempts several
+    graceful shutdown steps:
+
+    1. Try to gracefully shutdown nodes via lifecycle (if supported).
+    2. Kill processes that contain common ROS2 launch/run signatures or the
+       'realsense' keyword.
+    3. Finally, launch the RealSense node via ros2 launch.
+
+    Returns the subprocess.Popen process for the launched camera, or None on failure.
+    """
+    def _stop_all_ros_nodes(timeout: float = 3.0):
+        """Attempt to stop running ROS2 nodes and camera publishers.
+
+        This helper is best-effort and will not raise on failure; it logs actions.
+        """
+        # 1) List ROS2 nodes
+        try:
+            out = subprocess.check_output("ros2 node list", shell=True, stderr=subprocess.DEVNULL, text=True, timeout=2)
+            nodes = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            logging.info(f"Found ROS2 nodes: {nodes}")
+        except Exception as e:
+            logging.debug(f"ros2 node list failed: {e}")
+            nodes = []
+
+        # 2) Try lifecycle shutdown for lifecycle-enabled nodes
+        for n in nodes:
+            try:
+                # attempt to put node into shutdown (if supports lifecycle)
+                subprocess.run(f"ros2 lifecycle set {shlex.quote(n)} shutdown", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+                logging.info(f"Lifecycle shutdown requested for node {n}")
+            except Exception:
+                pass
+
+        # 3) Small pause to let nodes exit
+        time.sleep(min(1.0, timeout))
+
+        # 4) Kill processes that look like ROS2 launch/run or contain 'realsense'
+        try:
+            ps = subprocess.check_output(['ps', 'aux'], text=True)
+        except Exception:
+            ps = ''
+
+        killed = []
+        for line in ps.splitlines():
+            # look for common ros2 invocation patterns or realsense
+            if 'ros2' in line or 'realsense' in line or 'rs_launch' in line or 'realsense2_camera' in line:
+                try:
+                    parts = line.split()
+                    pid = int(parts[1])
+                    # avoid killing our own process
+                    if pid == os.getpid():
+                        continue
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                        killed.append(pid)
+                    except Exception:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                            killed.append(pid)
+                        except Exception:
+                            logging.debug(f"Failed to kill pid {pid}")
+                except Exception:
+                    continue
+
+        if killed:
+            logging.info(f"Terminated processes matching ros2/realsense: {killed}")
+
+        # 5) As a final fallback, try pkill for realsense or ros2 launch processes
+        try:
+            subprocess.run("pkill -f realsense", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run("pkill -f 'ros2 launch'", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    # attempt to stop existing ROS nodes/topics first
     try:
-        # Source ROS2 and launch RealSense
+        logging.info("Stopping any existing ROS2 nodes/topics that may publish camera data...")
+        _stop_all_ros_nodes(timeout=3.0)
+    except Exception as e:
+        logging.warning(f"Failed while attempting to stop existing ROS nodes: {e}")
+
+    # Now launch the RealSense camera via ros2 launch
+    try:
         cmd = "bash -c 'source /opt/ros/humble/setup.bash && ros2 launch realsense2_camera rs_launch.py'"
         process = subprocess.Popen(
             cmd,

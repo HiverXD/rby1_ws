@@ -10,6 +10,7 @@ import threading
 from h5py_writer import H5Writer
 import time
 import h5py
+from gripper import Gripper
 
 @dataclass(frozen=True)
 class Settings:
@@ -94,17 +95,37 @@ def robot_state_callback(robot_state: rby.RobotState_A):
 def main(args: argparse.Namespace):
     MINIMUM_TIME = 0.5  # seconds
     frequency = 1  # Hz
-    h5_file_path = '/media/nvidia/T7/Demo/demo_12.h5'
+    h5_file_path = '/media/nvidia/T7/Demo/demo_15.h5'
 
     robot = connect_rby1(args.rby1, args.rby1_model, args.no_head)
 
     with h5py.File(h5_file_path, 'r') as f:
         dataset = f['samples/robot_target_joints']
+        # initialize local gripper once (best-effort). If unavailable, we'll fall back to SDK calls.
+        gr = None
+        try:
+            gr = Gripper()
+            if not gr.initialize(verbose=False):
+                gr = None
+            else:
+                try:
+                    gr.homing()
+                except Exception:
+                    pass
+                try:
+                    gr.start()
+                except Exception:
+                    pass
+        except Exception:
+            gr = None
+
         for data in dataset:
             start_time = time.time()
-            torso_joints=data[2:8]
-            right_joints=data[8:15]
-            left_joints=data[15:22]
+            # data layout: [gripper_right, gripper_left, torso(6), right_arm(7), left_arm(7)]
+            gripper_state = np.asarray(data[0:2], dtype=float)
+            torso_joints = data[2:8]
+            right_joints = data[8:15]
+            left_joints = data[15:22]
 
             rc = rby.RobotCommandBuilder().set_command(
                 rby.ComponentBasedCommandBuilder().set_body_command(
@@ -127,9 +148,44 @@ def main(args: argparse.Namespace):
                 )
             )
 
-            rv = robot.send_command(rc, 10).get()
+            # send body command
+            try:
+                rv = robot.send_command(rc, 10).get()
+            except Exception:
+                rv = None
+
+            # apply gripper state for this timestep (best-effort)
+            try:
+                # Prefer the local Gripper class if initialized
+                if gr is not None:
+                    # gripper expects normalized target array [right, left]
+                    try:
+                        gr.set_normalized_target(gripper_state)
+                    except Exception as e:
+                        logging.debug(f"Failed to set local gripper target: {e}")
+                else:
+                    # Fallback: try setting via SDK RPC (simulator-friendly). Use best-effort calls.
+                    try:
+                        # right
+                        val_r = float(np.asarray(gripper_state).reshape(-1)[0])
+                        try:
+                            robot.set_tool_position("right", val_r)
+                        except Exception:
+                            pass
+                        # left (if present)
+                        if gripper_state.size > 1:
+                            val_l = float(np.asarray(gripper_state).reshape(-1)[1])
+                            try:
+                                robot.set_tool_position("left", val_l)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
             time.sleep(max(0, 1/frequency-(time.time() - start_time)))
+            
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RB-Y1 VR Control Launcher")

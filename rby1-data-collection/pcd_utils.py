@@ -2,49 +2,6 @@ import numpy as np
 import struct
 
 
-def farthest_point_sampling(points, colors, target_size=2048):
-    """
-    Downsample point cloud using Farthest Point Sampling (FPS).
-    
-    Args:
-        points: Nx3 array of XYZ coordinates
-        colors: Nx3 array of RGB colors (0-255)
-        target_size: Target number of points (default 2048)
-    
-    Returns:
-        downsampled_points: Mx3 array of XYZ coordinates (M <= target_size)
-        downsampled_colors: Mx3 array of RGB colors (0-255)
-    """
-    n_points = len(points)
-    
-    if n_points <= target_size:
-        # Already smaller than target, return as is
-        return points, colors
-    
-    # Initialize with random first point
-    selected_indices = [np.random.randint(0, n_points)]
-    distances = np.full(n_points, np.inf)
-    
-    # Iteratively select farthest points
-    for _ in range(target_size - 1):
-        # Get last selected point
-        last_idx = selected_indices[-1]
-        last_point = points[last_idx]
-        
-        # Calculate distances from last point to all points
-        dist_to_last = np.linalg.norm(points - last_point, axis=1)
-        
-        # Update minimum distances
-        distances = np.minimum(distances, dist_to_last)
-        
-        # Select point with maximum minimum distance
-        farthest_idx = np.argmax(distances)
-        selected_indices.append(farthest_idx)
-    
-    selected_indices = np.array(selected_indices)
-    return points[selected_indices], colors[selected_indices]
-
-
 def downsample_pointcloud(points, colors, target_size=2048):
     """
     Downsample point cloud to target size using random sampling.
@@ -70,7 +27,7 @@ def downsample_pointcloud(points, colors, target_size=2048):
     return points[indices], colors[indices]
 
 
-def rgbd_to_pointcloud(rgb, depth, fx, fy, cx, cy, depth_scale=1000.0, max_points=None, max_depth=2.0, use_fps=True):
+def rgbd_to_pointcloud(rgb, depth, fx, fy, cx, cy, depth_scale=1000.0, max_points=None):
     """
     Convert RGB-D images to point cloud.
     
@@ -81,8 +38,6 @@ def rgbd_to_pointcloud(rgb, depth, fx, fy, cx, cy, depth_scale=1000.0, max_point
         cx, cy: Principal point coordinates
         depth_scale: Scale to convert depth to meters (default 1000 for mm to m)
         max_points: Maximum number of points to return (downsamples if needed)
-        max_depth: Maximum depth in meters to include (default 2.0m)
-        use_fps: Use Farthest Point Sampling instead of random sampling (default True)
     
     Returns:
         points: Nx3 array of XYZ coordinates
@@ -93,14 +48,11 @@ def rgbd_to_pointcloud(rgb, depth, fx, fy, cx, cy, depth_scale=1000.0, max_point
     # Create pixel grid
     u, v = np.meshgrid(np.arange(W), np.arange(H))
     
-    # Convert depth to meters
-    depth_m = depth.astype(np.float32) / depth_scale
+    # Valid depth mask (non-zero)
+    valid = depth > 0
     
-    # Valid depth mask (non-zero and within max_depth threshold)
-    # valid = (depth > 0) & (depth_m <= max_depth)
-    valid = depth_m > 0
-
-    z = depth_m[valid]
+    # Convert depth to meters
+    z = depth[valid].astype(np.float32) / depth_scale
     
     # Back-project to 3D
     x = (u[valid] - cx) * z / fx
@@ -113,11 +65,8 @@ def rgbd_to_pointcloud(rgb, depth, fx, fy, cx, cy, depth_scale=1000.0, max_point
     colors = rgb[valid]
     
     # Downsample if requested
-    # if max_points is not None and len(points) > max_points:
-    #     if use_fps:
-    #         points, colors = farthest_point_sampling(points, colors, max_points)
-    #     else:
-    #         points, colors = downsample_pointcloud(points, colors, max_points)
+    if max_points is not None and len(points) > max_points:
+        points, colors = downsample_pointcloud(points, colors, max_points)
     
     return points, colors
 

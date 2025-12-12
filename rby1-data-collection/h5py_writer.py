@@ -132,8 +132,8 @@ class H5Writer:
                     first = next((s for s in batch if s.get("robot_position") is not None), None)
                     rp_dim = len(first["robot_position"]) if first else 0
 
-                    first_rtc = next((s for s in batch if s.get("robot_target_cartesian") is not None), None)
-                    rtc_dim = len(first_rtc["robot_target_cartesian"]) if first_rtc else 0
+                    # first_rtc = next((s for s in batch if s.get("robot_target_cartesian") is not None), None)
+                    # rtc_dim = len(first_rtc["robot_target_cartesian"]) if first_rtc else 0
 
                     # All joint target arrays have same dimension as robot_position
                     joint_dim = rp_dim
@@ -150,10 +150,10 @@ class H5Writer:
                                                   shape=(0, rp_dim), maxshape=(None, rp_dim),
                                                   dtype="f8", chunks=True, compression="gzip")
                                if rp_dim > 0 else None)
-                    d_robot_target_cart = (grp.create_dataset("robot_target_cartesian",
-                                                  shape=(0, rtc_dim), maxshape=(None, rtc_dim),
-                                                  dtype="f8", chunks=True, compression="gzip")
-                               if rtc_dim > 0 else None)
+                    # d_robot_target_cart = (grp.create_dataset("robot_target_cartesian",
+                    #                               shape=(0, rtc_dim), maxshape=(None, rtc_dim),
+                    #                               dtype="f8", chunks=True, compression="gzip")
+                    #            if rtc_dim > 0 else None)
                     d_robot_target_joints = (grp.create_dataset("robot_target_joints",
                                                   shape=(0, joint_dim), maxshape=(None, joint_dim),
                                                   dtype="f8", chunks=True, compression="gzip")
@@ -222,11 +222,11 @@ class H5Writer:
                                 [np.nan] * d_robot.shape[1]
                                 if s.get("robot_position") is None else s["robot_position"]
                             )
-                        if d_robot_target_cart is not None:
-                            rtc_list.append(
-                                [np.nan] * d_robot_target_cart.shape[1]
-                                if s.get("robot_target_cartesian") is None else s["robot_target_cartesian"]
-                            )
+                        # if d_robot_target_cart is not None:
+                        #     rtc_list.append(
+                        #         [np.nan] * d_robot_target_cart.shape[1]
+                        #         if s.get("robot_target_cartesian") is None else s["robot_target_cartesian"]
+                        #     )
                         if d_robot_target_joints is not None:
                             rtj_list.append(
                                 [np.nan] * d_robot_target_joints.shape[1]
