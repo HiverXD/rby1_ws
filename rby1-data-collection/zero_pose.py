@@ -16,13 +16,46 @@ def main(address, model, power, servo):
     torso_dof = len(model.torso_idx)
     right_arm_dof = len(model.right_arm_idx)
     left_arm_dof = len(model.left_arm_idx)
+    head_dof = len(model.head_idx)
+
+    shoulder_pitch_angle = 70.0
+    shoulder_roll_angle = 30.0
+    elbow_angle = -100.0
+    wrist_angle = -70.0
+
+    right_arm_midpoint1 = np.deg2rad([0.0, 0.0, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
+    left_arm_midpoint1 = np.deg2rad([0.0, 0.0, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
+
+    right_arm_midpoint2 = np.deg2rad([shoulder_pitch_angle, -shoulder_roll_angle, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
+    left_arm_midpoint2 = np.deg2rad([shoulder_pitch_angle, shoulder_roll_angle, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
+
+    movej(
+        robot,
+        np.zeros(torso_dof),
+        right_arm_midpoint1,
+        left_arm_midpoint1,
+        np.zeros(head_dof),
+        minimum_time=10,
+    )
+
+    movej(
+        robot,
+        np.zeros(torso_dof),
+        right_arm_midpoint2,
+        left_arm_midpoint2,
+        np.zeros(head_dof),
+        minimum_time=10,
+    )
+
     movej(
         robot,
         np.zeros(torso_dof),
         np.zeros(right_arm_dof),
         np.zeros(left_arm_dof),
+        np.zeros(head_dof),
         minimum_time=10,
     )
+
     # q_joint_waist = np.array([0, 0, 0, 0, 0, 0]) 
     # q_joint_right_arm = np.array([0, 0, 0, 0, 0, 0, 0])
     # q_joint_left_arm = np.array([0, 0, 0, 0, 0, 0, 0])
@@ -31,18 +64,6 @@ def main(address, model, power, servo):
     # # q_joint_left_arm = np.array([-13.2, 35.7, -13.3, -138.5, 59.2, 101.4, 72.2]) * D2R
     # # Combine joint positions
     # q_init = np.concatenate([q_joint_waist, q_joint_right_arm, q_joint_left_arm])
-
-    # # Build command
-    # rc = rby.RobotCommandBuilder().set_command(
-    #     rby.ComponentBasedCommandBuilder().set_body_command(
-    #         rby.BodyCommandBuilder().set_command(
-    #             rby.JointPositionCommandBuilder()
-    #             .set_position(q_init)
-    #             .set_minimum_time(10)
-    #         )
-    #     )
-    # )
-    # rv = robot.send_command(rc, 10)
 
 
 if __name__ == "__main__":
