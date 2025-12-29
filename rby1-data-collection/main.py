@@ -3,15 +3,10 @@ import logging
 import zmq
 import time
 import threading
-from dataclasses import dataclass
 import rby1_sdk as rby
-import socket
-from typing import Union, Optional
-import json
 import numpy as np
 from scipy.spatial.transform import Rotation as R, Slerp
 from gripper import Gripper
-from vr_control_state import VRControlState
 import pickle
 # from lerobot_handler import LeRobotDataHandler
 from rclpy.executors import SingleThreadedExecutor  # or MultiThreadedExecutor
@@ -22,93 +17,18 @@ from h5py_writer import H5Writer
 # ROS2 Camera subscriber
 import rclpy
 
-from rclpy.node import Node
-from sensor_msgs.msg import Image
 import numpy as np
 import time
 
 from utils import *
 
-from rclpy.qos import qos_profile_sensor_data
 import threading
-import subprocess
-import os
-import signal
-import shlex
-import re
-import copy
 from helper import * 
 
-class HeadCamSub(Node):
-    def __init__(self):
-        super().__init__('head_cam_sub')
-        self._lock = threading.Lock()
-        self._got_first_color = threading.Event()
-        self._got_first_depth = threading.Event()
-        self._seq = 0
-        
-        # Subscribe to color image
-        self.color_sub = self.create_subscription(
-            Image,
-            '/camera/camera/color/image_raw',
-            self.color_cb,
-            qos_profile_sensor_data,
-        )
-        
-        # Subscribe to depth image
-        self.depth_sub = self.create_subscription(
-            Image,
-            '/camera/camera/depth/image_rect_raw',
-            self.depth_cb,
-            qos_profile_sensor_data,
-        )
-        
-        self.curr_frame = None
-        self.curr_depth = None
-        self.last_stamp = None  # (sec, nsec) from ROS header
-        self.last_depth_stamp = None
-
-    def color_cb(self, msg: Image):
-        arr = rosimg_to_numpy(msg)  # should be HxWx3 uint8
-        #with self._lock:
-        self.curr_frame = arr  # store latest
-        self.last_stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-        self._seq += 1
-        self._got_first_color.set()
-        # try:
-        #     # log arrival of a new color frame (seq and composed timestamp)
-        #     ts = float(self.last_stamp[0]) + float(self.last_stamp[1]) * 1e-9
-        #     logging.info(f"[HeadCamSub] color frame arrived seq={self._seq} ts={ts:.6f}")
-        # except Exception:
-        #     pass
-
-    def depth_cb(self, msg: Image):
-        # Depth image is typically uint16 Z16 format
-        depth_arr = np.frombuffer(msg.data, dtype=np.uint16)
-        depth_arr = depth_arr.reshape((msg.height, msg.width))
-        #with self._lock:
-        self.curr_depth = depth_arr
-        self.last_depth_stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-        self._got_first_depth.set()
-        # try:
-        #     ts = float(self.last_depth_stamp[0]) + float(self.last_depth_stamp[1]) * 1e-9
-        #     logging.info(f"[HeadCamSub] depth frame arrived ts={ts:.6f}")
-        # except Exception:
-        #     pass
-
-    # helper to safely fetch a copy
-    def get_frame_copy(self):
-        #with self._lock:
-        if self.curr_frame is None:
-            return None, None, None
-        return copy.deepcopy(self.curr_frame), self.last_stamp, self._seq
-    
-    def get_depth_copy(self):
-        #with self._lock:
-        if self.curr_depth is None:
-            return None, None
-        return copy.deepcopy(self.curr_depth), self.last_depth_stamp
-
+from camera import HeadCamSub, start_realsense_camera
+from setup import Settings, SystemContext
+from robot_communicate import robot_state_callback, connect_rby1
+from vr_communicate import setup_meta_quest_udp_communication, handle_vr_button_event
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)-8s - %(message)s"
@@ -121,308 +41,12 @@ T_conv = np.array([
     [0, 0, 0, 1],
 ])
 
-
-@dataclass(frozen=True)
-class Settings:
-    dt: float = 0.1
-    hand_offset: float = np.array([0.0, 0.0, 0.0])
-
-    T_hand_offset = np.identity(4)
-    T_hand_offset[0:3, 3] = hand_offset
-
-    vr_control_local_port: int = 5005
-    vr_control_meta_quest_port: int = 6000
-
-    mobile_linear_acceleration_gain: float = 0.15
-    mobile_angular_acceleration_gain: float = 0.15
-    mobile_linear_damping_gain: float = 0.3
-    mobile_angular_damping_gain: float = 0.3
-
-    rec_fps: int = 10
-
-    MAX_POINT: int = None
-
-    # Initial poses in degrees
-    torso_init_pose: tuple = (0.0, 20.0, -40.0, 20.0, 0.0, 0.0)
-    right_arm_init_pose: tuple = (0.0, -15.0, 0.0, -120.0, 0.0, 70.0, 0.0)
-    left_arm_init_pose: tuple = (0.0, 15.0, 0.0, -120.0, 0.0, 70.0, 0.0)
-    torso_head_init_pose: tuple = (0.0, 0.0)
-    bimanual_head_init_pose: tuple = (0.0, 40.0)
-    
-    shoulder_pitch_angle = 70.0
-    shoulder_roll_angle = 30.0
-    elbow_angle = -100.0
-    wrist_angle = -70.0
-
-    right_arm_midpoint1 = np.deg2rad([shoulder_pitch_angle, -shoulder_roll_angle, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
-    left_arm_midpoint1 = np.deg2rad([shoulder_pitch_angle, shoulder_roll_angle, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
-
-    right_arm_midpoint2 = np.deg2rad([0.0, -15.0, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
-    left_arm_midpoint2 = np.deg2rad([0.0, 15.0, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
-
-    body_init_pose: float = np.deg2rad(torso_init_pose + right_arm_init_pose + left_arm_init_pose)
-
-
-class SystemContext:
-    robot_model: Union[rby.Model_A, rby.Model_M] = None
-    vr_state: VRControlState = VRControlState()
-    # H5 writer and recording stop-event stored here so other threads/handlers can access them
-    h5_writer: Optional[H5Writer] = None
-    #lerobot
-    #lerobot_handler: Optional[LeRobotDataHandler] = None
-    rec_stop_event: Optional[threading.Event] = None
-
-
 def open_zmq_pub_socket(bind_address: str) -> zmq.Socket:
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
     socket.bind(bind_address)
     logging.info(f"ZMQ PUB server opened at {bind_address}")
     return socket
-
-
-def robot_state_callback(robot_state: rby.RobotState_A):
-    SystemContext.vr_state.joint_positions = robot_state.position # NOTE: where the current robot state is saved 
-    SystemContext.vr_state.center_of_mass = robot_state.center_of_mass
-
-
-def connect_rby1(address: str, model: str = "a", no_head: bool = False):
-    logging.info(f"Attempting to connect to RB-Y1... (Address: {address}, Model: {model})")
-    robot = rby.create_robot(address, model)
-
-    connected = robot.connect()
-    if not connected:
-        logging.critical("Failed to connect to RB-Y1. Exiting program.")
-        exit(1)
-    logging.info("Successfully connected to RB-Y1.")
-
-    servo_pattern = "^(?!head_).*" if no_head else ".*"
-    if not robot.is_power_on(servo_pattern):
-        logging.warning("Robot power is off. Turning it on...")
-        if not robot.power_on(servo_pattern):
-            logging.critical("Failed to power on. Exiting program.")
-            exit(1)
-        logging.info("Power turned on successfully.")
-    else:
-        logging.info("Power is already on.")
-
-    if not robot.is_servo_on(".*"):
-        logging.warning("Servo is off. Turning it on...")
-        if not robot.servo_on(".*"):
-            logging.critical("Failed to turn on the servo. Exiting program.")
-            exit(1)
-        logging.info("Servo turned on successfully.")
-    else:
-        logging.info("Servo is already on.")
-
-    cm_state = robot.get_control_manager_state().state
-    if cm_state in [
-        rby.ControlManagerState.State.MajorFault,
-        rby.ControlManagerState.State.MinorFault,
-    ]:
-        logging.warning(f"Control Manager is in Fault state: {cm_state.name}. Attempting reset...")
-        if not robot.reset_fault_control_manager():
-            logging.critical("Failed to reset Control Manager. Exiting program.")
-            exit(1)
-        logging.info("Control Manager reset successfully.")
-    if not robot.enable_control_manager(unlimited_mode_enabled=True):
-        logging.critical("Failed to enable Control Manager. Exiting program.")
-        exit(1)
-    logging.info("Control Manager successfully enabled. (Unlimited Mode: enabled)")
-
-    SystemContext.robot_model = robot.model()
-    robot.start_state_update(robot_state_callback, 1 / Settings.dt)
-
-    return robot
-
-
-def setup_meta_quest_udp_communication(local_ip: str, local_port: int, meta_quest_ip: str, meta_quest_port: int,
-                                       power_off=None):
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        target_info = {
-            "ip": local_ip,
-            "port": local_port
-        }
-        message = json.dumps(target_info).encode('utf-8')
-        sock.sendto(message, (meta_quest_ip, meta_quest_port))
-        logging.info(f"Sent local PC info to Meta Quest: {target_info}")
-
-    def udp_server():
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server_sock:
-            server_sock.bind((local_ip, local_port))
-            logging.info(f"UDP server running to receive Meta Quest Controller data... {local_ip}:{local_port}")
-            while True:
-                data, addr = server_sock.recvfrom(4096)
-                udp_msg = data.decode('utf-8')
-                try:
-                    SystemContext.vr_state.controller_state = json.loads(udp_msg)
-                    if "left" in SystemContext.vr_state.controller_state["hands"]:
-                        buttons = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]
-                        primary_button = buttons["primaryButton"]
-                        secondary_button = buttons["secondaryButton"]
-
-                        SystemContext.vr_state.event_left_a_pressed |= primary_button
-                        SystemContext.vr_state.event_left_b_pressed |= secondary_button
-
-                        # HACK: record/stop trigger
-                        if primary_button: # NOTE: equivalent to 'X' in left controller
-                            if power_off is not None:
-                                logging.warning("Left X button pressed. Shutting down power.")
-                                power_off()
-                            pass
-
-                    if "right" in SystemContext.vr_state.controller_state["hands"]:
-                        buttons = SystemContext.vr_state.controller_state["hands"]["right"]["buttons"]
-                        primary_button = buttons["primaryButton"]
-                        secondary_button = buttons["secondaryButton"]
-
-                        SystemContext.vr_state.event_right_a_pressed |= primary_button
-                        SystemContext.vr_state.event_right_b_pressed |= secondary_button
-
-                except json.JSONDecodeError as e:
-                    logging.warning(f"Failed to decode JSON: {e} (from {addr}) - received data: {message[:100]}")
-
-    thread = threading.Thread(target=udp_server, daemon=True)
-    thread.start()
-
-
-def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool):
-    global torso_mode
-    model = robot.model()
-    torso_dof = len(model.torso_idx)
-    head_dof = len(model.head_idx)
-
-    if SystemContext.vr_state.event_right_a_pressed:
-        logging.info("Right A button pressed. Torso Mode initialized. Moving robot to ready pose.")
-        if robot.get_control_manager_state().control_state != rby.ControlManagerState.ControlState.Idle:
-            robot.cancel_control()
-        if robot.wait_for_control_ready(1000):
-            cbc = (
-                rby.ComponentBasedCommandBuilder()
-                .set_body_command(
-                    rby.JointImpedanceControlCommandBuilder()
-                    .set_command_header(rby.CommandHeaderBuilder().set_control_hold_time(1))
-                    .set_position(Settings.body_init_pose)
-                    .set_stiffness([400.] * 6 + [60] * 7 + [60] * 7)
-                    .set_torque_limit([500] * 6 + [30] * 7 + [30] * 7)
-                    .set_minimum_time(2)
-                )
-            )
-            # If head is present, move head to zero pose on initialization
-            if (not no_head) and getattr(SystemContext, "robot_model", None) is not None:
-                try:
-                    head_len = len(SystemContext.robot_model.head_idx)
-                    if head_len > 0:
-                        cbc.set_head_command(
-                            rby.JointPositionCommandBuilder()
-                            .set_position(np.deg2rad(Settings.torso_head_init_pose))
-                            .set_minimum_time(2)
-                        )
-                except Exception as e:
-                    logging.warning(f"Failed to set head zero pose on init: {e}")
-
-            robot.send_command(
-                rby.RobotCommandBuilder().set_command(
-                    cbc
-                )
-            ).get()
-        torso_mode = True
-        SystemContext.vr_state.is_initialized = True
-        SystemContext.vr_state.is_stopped = False
-
-    elif SystemContext.vr_state.event_left_b_pressed:
-        logging.info("Left Y button pressed. Bimanual Mode initialized. Moving robot to ready pose.")
-        if robot.get_control_manager_state().control_state != rby.ControlManagerState.ControlState.Idle:
-            robot.cancel_control()
-        if robot.wait_for_control_ready(1000):
-            movej(
-            robot,
-            np.zeros(torso_dof),
-            Settings.right_arm_midpoint1,
-            Settings.left_arm_midpoint1,
-            np.zeros(head_dof),
-            minimum_time=10,
-    )
-
-            movej(
-                robot,
-                np.zeros(torso_dof),
-                Settings.right_arm_midpoint2,
-                Settings.left_arm_midpoint2,
-                np.zeros(head_dof),
-                minimum_time=10,
-            )
-            cbc = (
-                rby.ComponentBasedCommandBuilder()
-                .set_body_command(
-                    rby.JointImpedanceControlCommandBuilder()
-                    .set_command_header(rby.CommandHeaderBuilder().set_control_hold_time(1))
-                    .set_position(Settings.body_init_pose)
-                    .set_stiffness([400.] * 6 + [60] * 7 + [60] * 7)
-                    .set_torque_limit([500] * 6 + [30] * 7 + [30] * 7)
-                    .set_minimum_time(2)
-                )
-            )
-
-            # If head is present, move head to zero pose on initialization
-            if (not no_head) and getattr(SystemContext, "robot_model", None) is not None:
-                try:
-                    head_len = len(SystemContext.robot_model.head_idx)
-                    if head_len > 0:
-                        cbc.set_head_command(
-                            rby.JointPositionCommandBuilder()
-                            .set_position(np.deg2rad(Settings.bimanual_head_init_pose))
-                            .set_minimum_time(2)
-                        )
-                except Exception as e:
-                    logging.warning(f"Failed to set head zero pose on init: {e}")
-
-            robot.send_command(
-                rby.RobotCommandBuilder().set_command(
-                    cbc
-                )
-            ).get()
-        torso_mode = False
-        SystemContext.vr_state.is_initialized = True
-        SystemContext.vr_state.is_stopped = False
-
-    elif SystemContext.vr_state.event_right_b_pressed:
-        logging.info("Right B button pressed. Stopping and saving recording.")
-        # Stop the demo logger (signal its stop event) and flush/close the H5 file
-        try:
-            if SystemContext.rec_stop_event is not None:
-                SystemContext.rec_stop_event.set()
-                logging.info("Signaled demo logger to stop")
-        except Exception as e:
-            logging.warning(f"Failed to signal demo logger: {e}")
-
-        try:
-            if SystemContext.h5_writer is not None:
-                SystemContext.h5_writer.stop()
-                logging.info("H5 writer stopped and file saved")
-        except Exception as e:
-            logging.warning(f"Failed to stop H5 writer: {e}")
-        # lerobot
-        '''try:
-            if SystemContext.lerobot_handler is not None:
-                SystemContext.lerobot_handler.save_episode()
-                logging.info("LeRobot handler saved episode")
-        except Exception as e:
-            logging.warning(f"Failed to save LeRobot episode: {e}")'''
-        
-
-        SystemContext.vr_state.is_stopped = True
-
-    else:
-        return False
-
-    SystemContext.vr_state.event_right_a_pressed = False
-    SystemContext.vr_state.event_right_b_pressed = False
-    SystemContext.vr_state.event_left_a_pressed = False
-    SystemContext.vr_state.event_left_b_pressed = False
-
-    return True
-
 
 def pose_to_se3(position, rotation_quat):
     T = np.eye(4)
@@ -627,108 +251,6 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
     logging.info(f"Started demo logger at {fps} FPS")
     return stop_event
 
-
-def start_realsense_camera():
-    """Stop existing ROS nodes/topics that may publish camera data, then start the
-    RealSense ROS2 camera launch in a subprocess. This function attempts several
-    graceful shutdown steps:
-
-    1. Try to gracefully shutdown nodes via lifecycle (if supported).
-    2. Kill processes that contain common ROS2 launch/run signatures or the
-       'realsense' keyword.
-    3. Finally, launch the RealSense node via ros2 launch.
-
-    Returns the subprocess.Popen process for the launched camera, or None on failure.
-    """
-    def _stop_all_ros_nodes(timeout: float = 3.0):
-        """Attempt to stop running ROS2 nodes and camera publishers.
-
-        This helper is best-effort and will not raise on failure; it logs actions.
-        """
-        # 1) List ROS2 nodes
-        try:
-            out = subprocess.check_output("ros2 node list", shell=True, stderr=subprocess.DEVNULL, text=True, timeout=2)
-            nodes = [ln.strip() for ln in out.splitlines() if ln.strip()]
-            logging.info(f"Found ROS2 nodes: {nodes}")
-        except Exception as e:
-            logging.debug(f"ros2 node list failed: {e}")
-            nodes = []
-
-        # 2) Try lifecycle shutdown for lifecycle-enabled nodes
-        for n in nodes:
-            try:
-                # attempt to put node into shutdown (if supports lifecycle)
-                subprocess.run(f"ros2 lifecycle set {shlex.quote(n)} shutdown", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
-                logging.info(f"Lifecycle shutdown requested for node {n}")
-            except Exception:
-                pass
-
-        # 3) Small pause to let nodes exit
-        time.sleep(min(1.0, timeout))
-
-        # 4) Kill processes that look like ROS2 launch/run or contain 'realsense'
-        try:
-            ps = subprocess.check_output(['ps', 'aux'], text=True)
-        except Exception:
-            ps = ''
-
-        killed = []
-        for line in ps.splitlines():
-            # look for common ros2 invocation patterns or realsense
-            if 'ros2' in line or 'realsense' in line or 'rs_launch' in line or 'realsense2_camera' in line:
-                try:
-                    parts = line.split()
-                    pid = int(parts[1])
-                    # avoid killing our own process
-                    if pid == os.getpid():
-                        continue
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                        killed.append(pid)
-                    except Exception:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                            killed.append(pid)
-                        except Exception:
-                            logging.debug(f"Failed to kill pid {pid}")
-                except Exception:
-                    continue
-
-        if killed:
-            logging.info(f"Terminated processes matching ros2/realsense: {killed}")
-
-        # 5) As a final fallback, try pkill for realsense or ros2 launch processes
-        try:
-            subprocess.run("pkill -f realsense", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run("pkill -f 'ros2 launch'", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-
-    # attempt to stop existing ROS nodes/topics first
-    try:
-        logging.info("Stopping any existing ROS2 nodes/topics that may publish camera data...")
-        _stop_all_ros_nodes(timeout=3.0)
-    except Exception as e:
-        logging.warning(f"Failed while attempting to stop existing ROS nodes: {e}")
-
-    # Now launch the RealSense camera via ros2 launch
-    try:
-        cmd = "bash -c 'source /opt/ros/humble/setup.bash && ros2 launch realsense2_camera rs_launch.py'"
-        process = subprocess.Popen(
-            cmd,
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setpgrp  # Create new process group
-        )
-        logging.info(f"Started RealSense camera node (PID: {process.pid})")
-        time.sleep(3)  # Wait for camera to initialize
-        return process
-    except Exception as e:
-        logging.error(f"Failed to start RealSense camera: {e}")
-        return None
-
-
 def main(args: argparse.Namespace):
     logging.info("=== VR Control System Starting ===")
     logging.info(f"Server Address       : {args.server}")
@@ -840,7 +362,9 @@ def main(args: argparse.Namespace):
         if SystemContext.vr_state.joint_positions.size == 0:
             continue
         
-        if handle_vr_button_event(robot, args.no_head):  #실행이 안됨
+        button_event, torso_mode = handle_vr_button_event(robot, args.no_head)
+
+        if button_event:  #실행이 안됨
             if stream is not None:
                 stream.cancel()
                 stream = None
