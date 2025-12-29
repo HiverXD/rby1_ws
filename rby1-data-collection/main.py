@@ -13,7 +13,7 @@ from scipy.spatial.transform import Rotation as R, Slerp
 from gripper import Gripper
 from vr_control_state import VRControlState
 import pickle
-
+# from lerobot_handler import LeRobotDataHandler
 from rclpy.executors import SingleThreadedExecutor  # or MultiThreadedExecutor
 
 # demo writer 
@@ -37,8 +37,7 @@ import signal
 import shlex
 import re
 import copy
-
-# MAX_POINT = 2048  # maximum number of points in point cloud
+from helper import * 
 
 class HeadCamSub(Node):
     def __init__(self):
@@ -76,12 +75,12 @@ class HeadCamSub(Node):
         self.last_stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
         self._seq += 1
         self._got_first_color.set()
-        try:
-            # log arrival of a new color frame (seq and composed timestamp)
-            ts = float(self.last_stamp[0]) + float(self.last_stamp[1]) * 1e-9
-            logging.info(f"[HeadCamSub] color frame arrived seq={self._seq} ts={ts:.6f}")
-        except Exception:
-            pass
+        # try:
+        #     # log arrival of a new color frame (seq and composed timestamp)
+        #     ts = float(self.last_stamp[0]) + float(self.last_stamp[1]) * 1e-9
+        #     logging.info(f"[HeadCamSub] color frame arrived seq={self._seq} ts={ts:.6f}")
+        # except Exception:
+        #     pass
 
     def depth_cb(self, msg: Image):
         # Depth image is typically uint16 Z16 format
@@ -91,11 +90,11 @@ class HeadCamSub(Node):
         self.curr_depth = depth_arr
         self.last_depth_stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
         self._got_first_depth.set()
-        try:
-            ts = float(self.last_depth_stamp[0]) + float(self.last_depth_stamp[1]) * 1e-9
-            logging.info(f"[HeadCamSub] depth frame arrived ts={ts:.6f}")
-        except Exception:
-            pass
+        # try:
+        #     ts = float(self.last_depth_stamp[0]) + float(self.last_depth_stamp[1]) * 1e-9
+        #     logging.info(f"[HeadCamSub] depth frame arrived ts={ts:.6f}")
+        # except Exception:
+        #     pass
 
     # helper to safely fetch a copy
     def get_frame_copy(self):
@@ -139,12 +138,38 @@ class Settings:
     mobile_linear_damping_gain: float = 0.3
     mobile_angular_damping_gain: float = 0.3
 
+    rec_fps: int = 10
+
+    MAX_POINT: int = None
+
+    # Initial poses in degrees
+    torso_init_pose: tuple = (0.0, 20.0, -40.0, 20.0, 0.0, 0.0)
+    right_arm_init_pose: tuple = (0.0, -15.0, 0.0, -120.0, 0.0, 70.0, 0.0)
+    left_arm_init_pose: tuple = (0.0, 15.0, 0.0, -120.0, 0.0, 70.0, 0.0)
+    torso_head_init_pose: tuple = (0.0, 0.0)
+    bimanual_head_init_pose: tuple = (0.0, 40.0)
+    
+    shoulder_pitch_angle = 70.0
+    shoulder_roll_angle = 30.0
+    elbow_angle = -100.0
+    wrist_angle = -70.0
+
+    right_arm_midpoint1 = np.deg2rad([shoulder_pitch_angle, -shoulder_roll_angle, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
+    left_arm_midpoint1 = np.deg2rad([shoulder_pitch_angle, shoulder_roll_angle, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
+
+    right_arm_midpoint2 = np.deg2rad([0.0, -15.0, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
+    left_arm_midpoint2 = np.deg2rad([0.0, 15.0, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
+
+    body_init_pose: float = np.deg2rad(torso_init_pose + right_arm_init_pose + left_arm_init_pose)
+
 
 class SystemContext:
     robot_model: Union[rby.Model_A, rby.Model_M] = None
     vr_state: VRControlState = VRControlState()
     # H5 writer and recording stop-event stored here so other threads/handlers can access them
     h5_writer: Optional[H5Writer] = None
+    #lerobot
+    #lerobot_handler: Optional[LeRobotDataHandler] = None
     rec_stop_event: Optional[threading.Event] = None
 
 
@@ -262,38 +287,102 @@ def setup_meta_quest_udp_communication(local_ip: str, local_port: int, meta_ques
 
 
 def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool):
+    global torso_mode
+    model = robot.model()
+    torso_dof = len(model.torso_idx)
+    head_dof = len(model.head_idx)
+
     if SystemContext.vr_state.event_right_a_pressed:
-        logging.info("Right A button pressed. Moving robot to ready pose.")
+        logging.info("Right A button pressed. Torso Mode initialized. Moving robot to ready pose.")
         if robot.get_control_manager_state().control_state != rby.ControlManagerState.ControlState.Idle:
             robot.cancel_control()
         if robot.wait_for_control_ready(1000):
-            ready_pose = np.deg2rad(
-                [0.0, 45.0, -90.0, 45.0, 0.0, 0.0] +
-                [0.0, -15.0, 0.0, -120.0, 0.0, 70.0, 0.0] +
-                [0.0, 15.0, 0.0, -120.0, 0.0, 70.0, 0.0])
             cbc = (
                 rby.ComponentBasedCommandBuilder()
                 .set_body_command(
                     rby.JointImpedanceControlCommandBuilder()
                     .set_command_header(rby.CommandHeaderBuilder().set_control_hold_time(1))
-                    .set_position(ready_pose)
+                    .set_position(Settings.body_init_pose)
                     .set_stiffness([400.] * 6 + [60] * 7 + [60] * 7)
                     .set_torque_limit([500] * 6 + [30] * 7 + [30] * 7)
                     .set_minimum_time(2)
                 )
             )
-            # if not no_head:
-            #     cbc.set_head_command(
-            #         rby.JointPositionCommandBuilder()
-            #         .set_position([0.] * len(SystemContext.robot_model.head_idx))
-            #         .set_minimum_time(2)
-            #     )
+            # If head is present, move head to zero pose on initialization
+            if (not no_head) and getattr(SystemContext, "robot_model", None) is not None:
+                try:
+                    head_len = len(SystemContext.robot_model.head_idx)
+                    if head_len > 0:
+                        cbc.set_head_command(
+                            rby.JointPositionCommandBuilder()
+                            .set_position(np.deg2rad(Settings.torso_head_init_pose))
+                            .set_minimum_time(2)
+                        )
+                except Exception as e:
+                    logging.warning(f"Failed to set head zero pose on init: {e}")
 
             robot.send_command(
                 rby.RobotCommandBuilder().set_command(
                     cbc
                 )
             ).get()
+        torso_mode = True
+        SystemContext.vr_state.is_initialized = True
+        SystemContext.vr_state.is_stopped = False
+
+    elif SystemContext.vr_state.event_left_b_pressed:
+        logging.info("Left Y button pressed. Bimanual Mode initialized. Moving robot to ready pose.")
+        if robot.get_control_manager_state().control_state != rby.ControlManagerState.ControlState.Idle:
+            robot.cancel_control()
+        if robot.wait_for_control_ready(1000):
+            movej(
+            robot,
+            np.zeros(torso_dof),
+            Settings.right_arm_midpoint1,
+            Settings.left_arm_midpoint1,
+            np.zeros(head_dof),
+            minimum_time=10,
+    )
+
+            movej(
+                robot,
+                np.zeros(torso_dof),
+                Settings.right_arm_midpoint2,
+                Settings.left_arm_midpoint2,
+                np.zeros(head_dof),
+                minimum_time=10,
+            )
+            cbc = (
+                rby.ComponentBasedCommandBuilder()
+                .set_body_command(
+                    rby.JointImpedanceControlCommandBuilder()
+                    .set_command_header(rby.CommandHeaderBuilder().set_control_hold_time(1))
+                    .set_position(Settings.body_init_pose)
+                    .set_stiffness([400.] * 6 + [60] * 7 + [60] * 7)
+                    .set_torque_limit([500] * 6 + [30] * 7 + [30] * 7)
+                    .set_minimum_time(2)
+                )
+            )
+
+            # If head is present, move head to zero pose on initialization
+            if (not no_head) and getattr(SystemContext, "robot_model", None) is not None:
+                try:
+                    head_len = len(SystemContext.robot_model.head_idx)
+                    if head_len > 0:
+                        cbc.set_head_command(
+                            rby.JointPositionCommandBuilder()
+                            .set_position(np.deg2rad(Settings.bimanual_head_init_pose))
+                            .set_minimum_time(2)
+                        )
+                except Exception as e:
+                    logging.warning(f"Failed to set head zero pose on init: {e}")
+
+            robot.send_command(
+                rby.RobotCommandBuilder().set_command(
+                    cbc
+                )
+            ).get()
+        torso_mode = False
         SystemContext.vr_state.is_initialized = True
         SystemContext.vr_state.is_stopped = False
 
@@ -313,6 +402,14 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
                 logging.info("H5 writer stopped and file saved")
         except Exception as e:
             logging.warning(f"Failed to stop H5 writer: {e}")
+        # lerobot
+        '''try:
+            if SystemContext.lerobot_handler is not None:
+                SystemContext.lerobot_handler.save_episode()
+                logging.info("LeRobot handler saved episode")
+        except Exception as e:
+            logging.warning(f"Failed to save LeRobot episode: {e}")'''
+        
 
         SystemContext.vr_state.is_stopped = True
 
@@ -353,6 +450,7 @@ def publish_gv(sock: zmq.Socket):
         time.sleep(0.1)
 
 # NOTE
+#lerobot_handler 나중에 추가
 def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) -> threading.Event:
     """
     Starts a daemon thread that prints a dict with:
@@ -434,11 +532,11 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             left_grip_pressed = False
 
             # 왼손 오른손 작동 그립 넷 중 하나 눌렀으면 데이터 수집
-            if "right" in SystemContext.vr_state.controller_state["hands"]:    
+            if "hands" in SystemContext.vr_state.controller_state and "right" in SystemContext.vr_state.controller_state["hands"]:    
                 right_arm_pressed = SystemContext.vr_state.controller_state["hands"]["right"]["buttons"]["grip"] > 0.8
                 right_grip_pressed = SystemContext.vr_state.controller_state["hands"]["right"]["buttons"]["trigger"] > 0.8
 
-            if "left" in SystemContext.vr_state.controller_state["hands"]: 
+            if "hands" in SystemContext.vr_state.controller_state and "left" in SystemContext.vr_state.controller_state["hands"]: 
                 left_arm_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["grip"] > 0.8          
                 left_grip_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["trigger"] > 0.8
 
@@ -473,7 +571,8 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                         pcd_points, pcd_colors = rgbd_to_pointcloud(
                             rgb_frame, depth_frame_for_pcd,
                             intrinsics['fx'], intrinsics['fy'],
-                            intrinsics['cx'], intrinsics['cy']
+                            intrinsics['cx'], intrinsics['cy'],
+                            max_points=Settings.MAX_POINT
                         )
                         
                         # Debug: check if PCD was generated
@@ -485,6 +584,17 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                         logging.warning(f"[demo_logger] Failed to generate PCD: {e}")
                 
                 print("demo saved\n")
+                '''#lerobot data
+                data_to_save = {
+                    "robot_position": robot_pos,
+                    "robot_target_joints": robot_target_joints,
+                    "gripper_state": grip,
+                    "base_state": base_state,
+                    "head_rgb": headcam_sub.curr_frame,
+                }
+                SystemContext.lerobot_handler.add_frame(data_to_save)'''
+                
+                
                 h5_writer.put({
                     "ts": time.time(),
                     "robot_position": robot_pos,
@@ -637,6 +747,7 @@ def main(args: argparse.Namespace):
     def power_off_and_stop():
         rec_data.set()  # stop signal for logging thread
         h5_writer.stop()  # save h5 file and exit
+        #SystemContext.lerobot_handler.save_episode()  # save lerobot episode
         robot.power_off(".*")
         # Clean up camera process
         if camera_process is not None:
@@ -678,10 +789,19 @@ def main(args: argparse.Namespace):
 
     output_path = get_next_h5_path("/media/nvidia/T7/Demo")
     h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
-    rec_data = start_demo_logger(gripper, h5_writer, robot, fps=10)
+    '''#lerobot data handler
+    data_handler = LeRobotDataHandler(
+        repo_id="rby1_teleop_demo",
+        root_dir=output_path/"LeRobotData",
+        fps=Settings.rec_fps
+    )
+    data_handler.initialize_dataset()'''
+    
+    rec_data = start_demo_logger(gripper, h5_writer, robot, fps=Settings.rec_fps)
 
     # expose writer and stop-event so button handlers can stop and save
     SystemContext.h5_writer = h5_writer
+    #SystemContext.lerobot_handler = data_handler
     SystemContext.rec_stop_event = rec_data
 
     logging.info(f"output path is {output_path}\n h5 is {h5_writer}\n")
@@ -709,6 +829,7 @@ def main(args: argparse.Namespace):
                     gripper_target = gripper.get_normalized_target()
                     gripper_target[0] = right_controller["buttons"]["trigger"]
                     gripper.set_normalized_target(gripper_target)
+
             if "left" in SystemContext.vr_state.controller_state["hands"]:
                 left_controller = SystemContext.vr_state.controller_state["hands"]["left"]
                 if gripper is not None:
@@ -718,8 +839,8 @@ def main(args: argparse.Namespace):
 
         if SystemContext.vr_state.joint_positions.size == 0:
             continue
-
-        if handle_vr_button_event(robot, args.no_head):
+        
+        if handle_vr_button_event(robot, args.no_head):  #실행이 안됨
             if stream is not None:
                 stream.cancel()
                 stream = None
@@ -819,7 +940,7 @@ def main(args: argparse.Namespace):
                     head_controller["position"],
                     head_controller["rotation"]) @ T_conv
 
-                following = SystemContext.vr_state.is_right_following and SystemContext.vr_state.is_left_following
+                following = SystemContext.vr_state.is_right_following and SystemContext.vr_state.is_left_following and torso_mode
                 if SystemContext.vr_state.is_torso_following and not following:
                     SystemContext.vr_state.is_torso_following = False
                 if not SystemContext.vr_state.is_torso_following and following:
@@ -865,7 +986,7 @@ def main(args: argparse.Namespace):
                 else:
                     left_T = SystemContext.vr_state.left_hand_locked_pose
 
-                if SystemContext.vr_state.is_torso_following:
+                if SystemContext.vr_state.is_torso_following and torso_mode:
                     print('a')
                     diff = np.linalg.inv(
                         SystemContext.vr_state.head_controller_start_pose) @ SystemContext.vr_state.head_controller_current_pose
@@ -1016,7 +1137,7 @@ if __name__ == "__main__":
         help="Model type of the RB-Y1 robot (default: a)"
     )
     parser.add_argument(
-        "--no_head", action="store_true", 
+        "--no_head", action="store_false", 
         help="Run without controlling the head"
     )
     parser.add_argument(
