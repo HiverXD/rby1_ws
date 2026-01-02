@@ -5,6 +5,7 @@ import threading
 import rby1_sdk as rby
 from h5py_writer import H5Writer
 from vr_control_state import VRControlState
+from lerobot_handler import LeRobotDataHandler
 
 @dataclass(frozen=True)
 class Settings:
@@ -33,10 +34,10 @@ class Settings:
     torso_head_init_pose: tuple = (0.0, 0.0)
     bimanual_head_init_pose: tuple = (0.0, 40.0)
     
-    shoulder_pitch_angle = 70.0
-    shoulder_roll_angle = 30.0
-    elbow_angle = -100.0
-    wrist_angle = -70.0
+    shoulder_pitch_angle: float = 70.0
+    shoulder_roll_angle: float = 30.0
+    elbow_angle: float = -100.0
+    wrist_angle: float = -70.0
 
     right_arm_midpoint1 = np.deg2rad([shoulder_pitch_angle, -shoulder_roll_angle, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
     left_arm_midpoint1 = np.deg2rad([shoulder_pitch_angle, shoulder_roll_angle, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
@@ -52,5 +53,5 @@ class SystemContext:
     # H5 writer and recording stop-event stored here so other threads/handlers can access them
     h5_writer: Optional[H5Writer] = None
     #lerobot
-    #lerobot_handler: Optional[LeRobotDataHandler] = None
+    lerobot_handler: Optional[LeRobotDataHandler] = None
     rec_stop_event: Optional[threading.Event] = None

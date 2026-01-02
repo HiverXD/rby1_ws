@@ -41,11 +41,10 @@ def main(address, model_name, power, servo):
         print("Robot is not connected")
         exit(1)
 
-    zero(address=address,
-        model=model_name,
-        power=power,
-        servo=servo,)
-
+    # zero(address=address,
+    #     model=model_name,
+    #     power=power,
+    #     servo=servo)
 
     robot.disable_control_manager()
     robot.power_off(power)

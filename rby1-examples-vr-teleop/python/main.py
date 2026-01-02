@@ -166,7 +166,7 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
             robot.cancel_control()
         if robot.wait_for_control_ready(1000):
             ready_pose = np.deg2rad(
-                [0.0, 45.0, -90.0, 45.0, 0.0, 0.0] +
+                [0.0, 20.0, -40.0, 20.0, 0.0, 0.0] +
                 [0.0, -15.0, 0.0, -120.0, 0.0, 70.0, 0.0] +
                 [0.0, 15.0, 0.0, -120.0, 0.0, 70.0, 0.0])
             cbc = (

@@ -1,6 +1,6 @@
 import rby1_sdk as rby
 import logging
-
+import numpy as np
 
 def initialize_robot(address, model, power=".*", servo=".*"):
     robot = rby.create_robot(address, model)
@@ -28,7 +28,7 @@ def initialize_robot(address, model, power=".*", servo=".*"):
     return robot
 
 
-def movej(robot, torso=None, right_arm=None, left_arm=None, minimum_time=0):
+def movej(robot, torso=None, right_arm=None, left_arm=None, head=None, minimum_time=0):
     rc = rby.BodyComponentBasedCommandBuilder()
     if torso is not None:
         rc.set_torso_command(
@@ -48,12 +48,27 @@ def movej(robot, torso=None, right_arm=None, left_arm=None, minimum_time=0):
             .set_minimum_time(minimum_time)
             .set_position(left_arm)
         )
+    
+    cbc = (
+        rby.ComponentBasedCommandBuilder()
+        .set_body_command(rc)
+    )
+
+    if head is not None:
+        try:
+            cbc.set_head_command(
+                rby.JointPositionCommandBuilder()
+                .set_position(head)
+                .set_minimum_time(minimum_time)
+                )
+        except Exception as e:
+            logging.warning(f"Failed to set head zero pose on init: {e}")
 
     rv = robot.send_command(
-        rby.RobotCommandBuilder().set_command(
-            rby.ComponentBasedCommandBuilder().set_body_command(rc)
-        ),
-        1,
+    rby.RobotCommandBuilder().set_command(
+        cbc
+    ),
+    1,
     ).get()
 
     if rv.finish_code != rby.RobotCommandFeedback.FinishCode.Ok:

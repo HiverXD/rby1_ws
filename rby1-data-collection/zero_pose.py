@@ -3,6 +3,7 @@ from helper import *
 import argparse
 import numpy as np
 import logging
+from setup import Settings
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -18,34 +19,29 @@ def main(address, model, power, servo):
     left_arm_dof = len(model.left_arm_idx)
     head_dof = len(model.head_idx)
 
-    shoulder_pitch_angle = 70.0
-    shoulder_roll_angle = 30.0
-    elbow_angle = -100.0
-    wrist_angle = -70.0
+    right_arm_midpoint1 = Settings.right_arm_midpoint1
+    left_arm_midpoint1 = Settings.left_arm_midpoint1
+    right_arm_midpoint2 = Settings.right_arm_midpoint2
+    left_arm_midpoint2 = Settings.left_arm_midpoint2
 
-    right_arm_midpoint1 = np.deg2rad([0.0, 0.0, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
-    left_arm_midpoint1 = np.deg2rad([0.0, 0.0, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
+    if (right_arm_midpoint1 is not None) and (left_arm_midpoint1 is not None):
+        movej(
+            robot,
+            np.zeros(torso_dof),
+            right_arm_midpoint2,
+            left_arm_midpoint2,
+            np.zeros(head_dof),
+            minimum_time=10,
+        )
 
-    right_arm_midpoint2 = np.deg2rad([shoulder_pitch_angle, -shoulder_roll_angle, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
-    left_arm_midpoint2 = np.deg2rad([shoulder_pitch_angle, shoulder_roll_angle, 0.0, elbow_angle, 0.0, wrist_angle, 0.0])
-
-    movej(
-        robot,
-        np.zeros(torso_dof),
-        right_arm_midpoint1,
-        left_arm_midpoint1,
-        np.zeros(head_dof),
-        minimum_time=10,
-    )
-
-    movej(
-        robot,
-        np.zeros(torso_dof),
-        right_arm_midpoint2,
-        left_arm_midpoint2,
-        np.zeros(head_dof),
-        minimum_time=10,
-    )
+        movej(
+            robot,
+            np.zeros(torso_dof),
+            right_arm_midpoint1,
+            left_arm_midpoint1,
+            np.zeros(head_dof),
+            minimum_time=10,
+        )
 
     movej(
         robot,
@@ -90,5 +86,5 @@ if __name__ == "__main__":
         address=args.address,
         model=args.model,
         power=args.power,
-        servo=args.servo,
+        servo=args.servo
     )

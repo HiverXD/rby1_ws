@@ -102,6 +102,11 @@ class H5Writer:
         d_depth_time = d_depth_img = None
         depth_idx = 0
         
+        # right wrist camera
+        d_right_cam_time = d_right_cam_img = None
+
+        # left wrist camera
+
         # PCD datasets
         d_pcd_time = d_pcd_points = d_pcd_colors = None
         pcd_idx = 0
@@ -114,6 +119,13 @@ class H5Writer:
             # camera stored in separate groups
             cam_grp = f.create_group("head_rgb")
             depth_grp = f.create_group("head_depth")
+
+            # right_cam_grp = f.create_group("right_wrist_rgb")
+            # left_cam_grp = f.create_group("left_wrist_rgb")
+
+            # right_depth_grp = f.create_group("right_wrist_depth")
+            # left_depth_grp = f.create_group("left_wrist_depth")
+
             # PCD group
             pcd_grp = f.create_group("pointclouds") if self.save_pcd else None
             batch = []

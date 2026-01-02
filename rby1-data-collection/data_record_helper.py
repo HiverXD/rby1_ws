@@ -3,7 +3,7 @@ from utils import *
 import logging 
 from h5py_writer import H5Writer
 import threading 
-
+import time
 
 @dataclass
 class RecordingSession:

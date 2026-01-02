@@ -114,7 +114,7 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
         if robot.get_control_manager_state().control_state != rby.ControlManagerState.ControlState.Idle:
             robot.cancel_control()
         if robot.wait_for_control_ready(1000):
-            if not started:
+            if not started and Settings.right_arm_midpoint1 is not None and Settings.left_arm_midpoint1 is not None:
                 movej(
                 robot,
                 np.zeros(torso_dof),
@@ -124,15 +124,16 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
                 minimum_time=10,
                 )
                 started = True
-
-            movej(
-                robot,
-                np.zeros(torso_dof),
-                Settings.right_arm_midpoint2,
-                Settings.left_arm_midpoint2,
-                np.zeros(head_dof),
-                minimum_time=10,
-            )
+                
+            if Settings.right_arm_midpoint2 is not None and Settings.left_arm_midpoint2 is not None:
+                movej(
+                    robot,
+                    np.zeros(torso_dof),
+                    Settings.right_arm_midpoint2,
+                    Settings.left_arm_midpoint2,
+                    np.zeros(head_dof),
+                    minimum_time=10,
+                )
             cbc = (
                 rby.ComponentBasedCommandBuilder()
                 .set_body_command(

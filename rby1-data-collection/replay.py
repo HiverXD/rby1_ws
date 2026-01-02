@@ -95,7 +95,7 @@ def robot_state_callback(robot_state: rby.RobotState_A):
 def main(args: argparse.Namespace):
     MINIMUM_TIME = 0.5  # seconds
     frequency = 1  # Hz
-    h5_file_path = '/media/nvidia/T7/Demo/demo_15.h5'
+    h5_file_path = '/media/nvidia/T7/Demo/demo_97.h5'
 
     robot = connect_rby1(args.rby1, args.rby1_model, args.no_head)
 
