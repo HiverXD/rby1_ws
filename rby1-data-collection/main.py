@@ -111,9 +111,8 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, data_handler, robot, f
 
 
     def _loop():
+        logging.info("loop started")
         next_t = time.perf_counter()
-
-        robot_pos_prev = None
 
         while not stop_event.is_set():
             # Thread-safe snapshot of latest camera frames
@@ -224,10 +223,14 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, data_handler, robot, f
                     "base_state": base_state,
                     "head_rgb": headcam_sub.curr_frame,
                 }
+                # print("robot_pose shape: ", robot_pos.shape)
+                # print("robot_target_joints shape: ", robot_target_joints.shape)
+                # print("gripper_state shape: ", grip.shape if grip is not None else None)
+                # print("base_state shape: ", base_state.shape if base_state is not None else None)
+                # print("head_rgb shape: ", headcam_sub.curr_frame.shape if headcam_sub.curr_frame is not None else None)
+                
+                data_handler.put(data_to_save)  # 실행이 안됨ㅜㅜㅜ
 
-                
-                data_handler.put(data_to_save)
-                
                 h5_writer.put({
                     "ts": time.time(),
                     "robot_position": robot_pos,
@@ -283,15 +286,13 @@ def main(args: argparse.Namespace):
     #lerobot data handler
     data_handler = LeRobotDataHandler(
         repo_id="rby1_teleop_demo",
-        root_dir="/media/nvidia/T7/Demo/LeRobotData2",
+        root_dir=get_next_lerobot_path("/media/nvidia/T7/Demo/LeRobotData"),
         fps=Settings.rec_fps
     )
     
-    print('\n'*10, '*'*20, '\n')
     
-    data_handler.initialize_dataset()
     data_handler.start()
-
+    
     def power_off_and_stop():
         rec_data.set()  # stop signal for logging thread
         h5_writer.stop()  # save h5 file and exit
@@ -336,6 +337,10 @@ def main(args: argparse.Namespace):
 
     rec_data = start_demo_logger(gripper, h5_writer, data_handler, robot, fps=Settings.rec_fps)
 
+    logging.info("data handler run started")
+
+    # data_handler._run()
+
     # expose writer and stop-event so button handlers can stop and save
     SystemContext.h5_writer = h5_writer
     SystemContext.lerobot_handler = data_handler
@@ -354,6 +359,9 @@ def main(args: argparse.Namespace):
     torso_reset = False
     right_reset = False
     left_reset = False
+
+    logging.info("Entering main control loop")
+
     while True:
         now = time.monotonic()
         if now < next_time:
@@ -377,9 +385,8 @@ def main(args: argparse.Namespace):
 
         if SystemContext.vr_state.joint_positions.size == 0:
             continue
-        
         button_event, torso_mode = handle_vr_button_event(robot, args.no_head)
-
+        
         if button_event:  #실행이 안됨
             if stream is not None:
                 stream.cancel()
@@ -642,7 +649,7 @@ def main(args: argparse.Namespace):
                     )
                 )
             except Exception as e:
-                logging.error(e)
+                logging.error(f"Stream error: {e}")
                 stream = None
                 exit(1)
 

@@ -184,13 +184,14 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
                 logging.info("H5 writer stopped and file saved")
         except Exception as e:
             logging.warning(f"Failed to stop H5 writer: {e}")
+        
         # lerobot
-        '''try:
+        try:
             if SystemContext.lerobot_handler is not None:
-                SystemContext.lerobot_handler.save_episode()
-                logging.info("LeRobot handler saved episode")
+                SystemContext.lerobot_handler.stop()
+                logging.info("LeRobot handler stopped and saved episode")
         except Exception as e:
-            logging.warning(f"Failed to save LeRobot episode: {e}")'''
+            logging.warning(f"Failed to save LeRobot episode: {e}")
         
 
         SystemContext.vr_state.is_stopped = True

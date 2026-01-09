@@ -3,7 +3,7 @@ import numpy as np
 import sys
 import argparse
 from rby1_sdk import *
-from zero_pose import main as zero
+from only_zero_pose import main as zero
 
 def cb(rs):
     print(f"Timestamp: {rs.timestamp - rs.ft_sensor_right.time_since_last_update}")
@@ -41,10 +41,10 @@ def main(address, model_name, power, servo):
         print("Robot is not connected")
         exit(1)
 
-    # zero(address=address,
-    #     model=model_name,
-    #     power=power,
-    #     servo=servo)
+    zero(address=address,
+        model=model_name,
+        power=power,
+        servo=servo)
 
     robot.disable_control_manager()
     robot.power_off(power)
