@@ -12,7 +12,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-from zero_pose import main as zero
+from only_zero_pose import main as zero
 
 def cb(rs):
     print(f"Timestamp: {rs.timestamp - rs.ft_sensor_right.time_since_last_update}")

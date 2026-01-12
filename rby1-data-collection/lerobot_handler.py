@@ -89,9 +89,14 @@ class LeRobotDataHandler:
             if item is None: break
 
             # 1. 지연 초기화
+            print(type(self.dataset))
             if self.dataset is None:
+                print("DEBUG: Dataset is None")
                 self.initialize_dataset(item)
-
+                print(type(self.dataset))
+            else:
+                print("DEBUG: Dataset is not None")
+            
             # 2. 소급 업데이트 처리
             # LeRobotDataset의 내부 버퍼에 접근하여 이전 프레임의 action 수정
             while not self._update_queue.empty():
@@ -136,7 +141,8 @@ class LeRobotDataHandler:
         if self.thread:
             self.thread.join()
         logging.info(f"Saving episode... (Collected frames: {self._current_idx})")
-        if self.dataset:
+        print("\n"*10, type(self.dataset), "\n"*10)
+        if self.dataset is not None:
             logging.info(f"Saving episode... (Collected frames: {self._current_idx})")
             if self._current_idx == 0:
                 logging.warning("⚠️ 저장된 프레임이 0개입니다! 데이터가 기록되지 않았습니다.")
@@ -146,11 +152,12 @@ class LeRobotDataHandler:
             try:
                 self.dataset.consolidate()
                 logging.info("✅ 변환 성공!")
+                logging.info(f"변환 완료! 저장 위치: {self.root_dir}")
             except Exception as e:
                 # 여기서 에러가 나면 로그에 뜸
                 logging.error(f"❌ 변환 실패 (FFmpeg 설치 확인 필요): {e}")
 
-            logging.info(f"변환 완료! 저장 위치: {self.root_dir}")
+            
             
         else:
             logging.error("데이터셋 객체가 없습니다 (None). initialize_dataset이 호출되었나요?")
