@@ -233,8 +233,6 @@ class MultiCamRGBDSync(Node):
     ):
         super().__init__("multi_cam_rgbd_sync")
 
-        assert len(cam_ids) == 3, "요청 조건: 카메라 3대"
-
         self.cam_ids = cam_ids
         self.multicam_tol = multicam_tol
         self.max_buf = max_buf
