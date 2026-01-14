@@ -120,7 +120,7 @@ class LeRobotDataHandler:
                                              if item.get("gripper_state") is not None else torch.zeros(2),
                 # "base_state": torch.from_numpy(item["base_state"]).float() if item.get("base_state") is not None else torch.zeros(3),
                 "observation.images.head_rgb": rgb_tensor,
-                "task": "pickandplace"
+                "task": "PuttingCupintotheDish"
             }
 
             # if item.get("pcd_points") is not None:

@@ -89,62 +89,6 @@ class HeadCamSub(Node):
             return None, None
         return copy.deepcopy(self.curr_depth), self.last_depth_stamp
 
-# 여러 개 카메라 사용 시
-class MultiCamSub(Node):
-    def __init__(self, camera_id: str = "camera"):  # 카메라 ID 파라미터 추가
-        super().__init__(f'head_cam_sub_{camera_id}')  # 노드명 유니크하게
-        self.camera_id = camera_id
-        self._got_first_color = threading.Event()
-        self._got_first_depth = threading.Event()
-        self._seq = 0
-
-        # 토픽 경로를 동적으로 설정
-        color_topic = f'/{camera_id}/camera/color/image_raw'
-        depth_topic = f'/{camera_id}/camera/depth/image_rect_raw'
-        
-        self.color_sub = self.create_subscription(
-            Image, color_topic, self.color_cb, qos_profile_sensor_data
-        )
-        # Subscribe to depth image
-        self.depth_sub = self.create_subscription(
-            Image, depth_topic, self.depth_cb, qos_profile_sensor_data,
-        )
-        
-        self.curr_frame = None
-        self.curr_depth = None
-        self.last_stamp = None  # (sec, nsec) from ROS header
-        self.last_depth_stamp = None
-
-    def color_cb(self, msg: Image):
-        arr = rosimg_to_numpy(msg)  # should be HxWx3 uint8
-        #with self._lock:
-        self.curr_frame = arr  # store latest
-        self.last_stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-        self._seq += 1
-        self._got_first_color.set()
-
-    def depth_cb(self, msg: Image):
-        # Depth image is typically uint16 Z16 format
-        depth_arr = np.frombuffer(msg.data, dtype=np.uint16)
-        depth_arr = depth_arr.reshape((msg.height, msg.width))
-        #with self._lock:
-        self.curr_depth = depth_arr
-        self.last_depth_stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-        self._got_first_depth.set()
-
-    # helper to safely fetch a copy
-    def get_frame_copy(self):
-        #with self._lock:
-        if self.curr_frame is None:
-            return None, None, None
-        return copy.deepcopy(self.curr_frame), self.last_stamp, self._seq
-    
-    def get_depth_copy(self):
-        #with self._lock:
-        if self.curr_depth is None:
-            return None, None
-        return copy.deepcopy(self.curr_depth), self.last_depth_stamp
-
 # ---------- Utilities ----------
 def stamp_to_float(stamp) -> float:
     # stamp: builtin_interfaces.msg.Time
@@ -233,8 +177,6 @@ class MultiCamRGBDSync(Node):
     ):
         super().__init__("multi_cam_rgbd_sync")
 
-        assert len(cam_ids) == 3, "요청 조건: 카메라 3대"
-
         self.cam_ids = cam_ids
         self.multicam_tol = multicam_tol
         self.max_buf = max_buf
@@ -299,6 +241,7 @@ class MultiCamRGBDSync(Node):
 
     # ----- Internal -----
     def _on_rgbd_frame(self, cam_id: str, frame: RGBDFrame):
+        self.get_logger().info(f"Frame received from {cam_id}")
         with self._lock:
             q = self._buf[cam_id]
             q.append(frame)

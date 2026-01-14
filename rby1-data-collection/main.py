@@ -9,23 +9,24 @@ from scipy.spatial.transform import Rotation as R, Slerp
 from gripper import Gripper
 import pickle
 from lerobot_handler import LeRobotDataHandler
-from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor  # or MultiThreadedExecutor
 
 # demo writer 
-from h5py_writer_cam import H5Writer
+from h5py_writer import H5Writer
 
 # ROS2 Camera subscriber
 import rclpy
 
 import numpy as np
 import time
+import yaml
 
 from utils import *
 
 import threading
 from helper import * 
 
-from camera import HeadCamSub, MultiCamRGBDSync, start_realsense_camera
+from camera import HeadCamSub, start_realsense_camera
 from setup import Settings, SystemContext
 from robot_communicate import robot_state_callback, connect_rby1
 from vr_communicate import setup_meta_quest_udp_communication, handle_vr_button_event
@@ -75,6 +76,11 @@ def publish_gv(sock: zmq.Socket):
         sock.send(pickle.dumps(SystemContext.vr_state))
         time.sleep(0.1)
 
+def get_config():
+    with open('rby1-data-collection/config.yaml', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+        return config
+
 # NOTE
 def start_demo_logger(gripper: Gripper | None, h5_writer, data_handler, robot, fps: int = 30) -> threading.Event:
     """
@@ -95,86 +101,30 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, data_handler, robot, f
     from pcd_utils import rgbd_to_pointcloud, REALSENSE_D435_INTRINSICS, REALSENSE_D435_INTRINSICS_848x480
 
     # FIXME: create sub node to retrieve image 
-    # headcam_sub = HeadCamSub()  # subclass of rclpy.node.Node
+    headcam_sub = HeadCamSub()  # subclass of rclpy.node.Node
 
     # headcam_sub = MultiCamSub(camera_id="head")
     # right_wrist_sub = MultiCamSub(camera_id="right_wrist")
     # left_wrist_sub = MultiCamSub(camera_id="left_wrist")
 
-    # executor = SingleThreadedExecutor()
-    # executor.add_node(headcam_sub)
+    executor = SingleThreadedExecutor()
+    executor.add_node(headcam_sub)
     # executor.add_node(right_wrist_sub)
     # executor.add_node(left_wrist_sub)
 
-    # logging.info("[demo_logger] Waiting for camera subscription spin thread to start...")
-    # spin_thread = threading.Thread(target=executor.spin, name="ros2_spin", daemon=True)
-    # spin_thread.start()
-
-    cam_ids = ["head", "right"]
-
-    node = MultiCamRGBDSync(
-        cam_ids=cam_ids,
-        topic_pattern_color="/{cam}/camera/color/image_raw",
-        topic_pattern_depth="/{cam}/camera/depth/image_rect_raw",
-        rgbd_slop=0.05,        # 카메라 내부 RGB-D 동기 (10fps면 0.03~0.08 사이에서 튜닝)
-        rgbd_queue=20,
-        multicam_tol=0.06,     # 카메라 간 세트 동기 (0.05~0.10에서 튜닝)
-        max_buf=50,
-    )
-
-    executor = MultiThreadedExecutor(num_threads=3)
-    executor.add_node(node)
-
-    spin_thread = threading.Thread(
-        target=executor.spin,
-        name="ros2_spin",
-        daemon=True
-    )
+    spin_thread = threading.Thread(target=executor.spin, name="ros2_spin", daemon=True)
     spin_thread.start()
 
-    time.sleep(2)  # Give spin thread time to initialize
-    
-    logging.info("[demo_logger] Camera nodes initialized. Waiting for first frames...")
-    
+
     def _loop():
         logging.info("loop started")
         next_t = time.perf_counter()
-        
-        # Debug: Monitor camera data reception
-        last_debug_time = time.time()
-        first_frame_logged = False
-        head_frame_count = 0
-        right_frame_count = 0
 
         while not stop_event.is_set():
             # Thread-safe snapshot of latest camera frames
-            # frame, frame_stamp, frame_seq = headcam_sub.get_frame_copy()
-            # depth, depth_stamp = headcam_sub.get_depth_copy()
+            frame, frame_stamp, frame_seq = headcam_sub.get_frame_copy()
+            depth, depth_stamp = headcam_sub.get_depth_copy()
             # Robot joint positions - 현재 포지션 읽기
-
-            # right wrist camera
-            # right_frame, right_frame_stamp, right_frame_seq = right_wrist_sub.get_frame_copy()
-            # right_depth, right_depth_stamp = right_wrist_sub.get_depth_copy()
-            
-            # # Debug: Log camera data reception every 5 seconds
-            # current_time = time.time()
-            # if current_time - last_debug_time > 5.0:
-            #     if frame is not None:
-            #         head_frame_count += 1
-            #     if right_frame is not None:
-            #         right_frame_count += 1
-                
-            #     head_status = f"✓ Received (shape={frame.shape})" if frame is not None else "✗ No Data"
-            #     right_status = f"✓ Received (shape={right_frame.shape})" if right_frame is not None else "✗ No Data"
-                
-            #     logging.info(f"[Camera Status] Head: {head_status} | Right Wrist: {right_status}")
-            #     logging.debug(f"[Camera Callbacks] Head Color: {headcam_sub._color_count} | Head Depth: {headcam_sub._depth_count} | Right Color: {right_wrist_sub._color_count} | Right Depth: {right_wrist_sub._depth_count}")
-                
-            #     last_debug_time = current_time
-
-            synced, set_seq = node.get_synced_set_copy()
-            frame, depth, frame_stamp, frame_seq, frame_t = synced["head"]
-            right_frame, right_depth, right_stamp, right_seq, right_t = synced["right"]
 
             robot_pos = None
             try:
@@ -279,14 +229,13 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, data_handler, robot, f
                     "base_state": base_state,
                     "head_rgb": headcam_sub.curr_frame,
                 }
+                # print("robot_pose shape: ", robot_pos.shape)
+                # print("robot_target_joints shape: ", robot_target_joints.shape)
+                # print("gripper_state shape: ", grip.shape if grip is not None else None)
+                # print("base_state shape: ", base_state.shape if base_state is not None else None)
+                # print("head_rgb shape: ", headcam_sub.curr_frame.shape if headcam_sub.curr_frame is not None else None)
                 
-                # Debug: Check right wrist camera data
-                if right_frame is not None:
-                    logging.info(f"[Data Save] Right wrist camera data: RGB shape={right_frame.shape}, Depth shape={right_depth.shape if right_depth is not None else 'None'}")
-                else:
-                    logging.warning(f"[Data Save] Right wrist camera data: RGB=None, Depth={right_depth.shape if right_depth is not None else 'None'}")
-                
-                data_handler.put(data_to_save)
+                data_handler.put(data_to_save)  # 실행이 안됨ㅜㅜㅜ
 
                 h5_writer.put({
                     "ts": time.time(),
@@ -299,10 +248,6 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, data_handler, robot, f
                     "head_rgb_ts": headcam_sub.last_stamp[1] if headcam_sub.last_stamp else None,
                     "head_depth": headcam_sub.curr_depth,
                     "head_depth_ts": headcam_sub.last_depth_stamp[1] if headcam_sub.last_depth_stamp else None,
-                    "right_wrist_rgb": right_wrist_sub.curr_frame,
-                    "right_wrist_rgb_ts": right_wrist_sub.last_stamp[1] if right_wrist_sub.last_stamp else None,
-                    "right_wrist_depth": right_wrist_sub.curr_depth,
-                    "right_wrist_depth_ts": right_wrist_sub.last_depth_stamp[1] if right_wrist_sub.last_depth_stamp else None,
                     "pcd_points": pcd_points,
                     "pcd_colors": pcd_colors
                 })
@@ -342,7 +287,14 @@ def main(args: argparse.Namespace):
     '''power off and stop에서 data_handler.stop() 정의하기 위해 
     output_path ~ data_handler까지 위치 옮김'''
     # start writing
-    output_path = get_next_h5_path("/media/nvidia/T7/Demo")
+    
+    config = get_config()
+    root_path = os.path.join(config['demo_root'], config['task_name'])
+
+    # 디렉토리가 없으면 생성 (이미 있으면 아무 동작 안 함)
+    os.makedirs(root_path, exist_ok=True)
+
+    output_path = get_next_h5_path(root_path)
     h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
     #lerobot data handler
     data_handler = LeRobotDataHandler(
@@ -399,6 +351,8 @@ def main(args: argparse.Namespace):
     rec_data = start_demo_logger(gripper, h5_writer, data_handler, robot, fps=Settings.rec_fps)
 
     logging.info("data handler run started")
+
+    # data_handler._run()
 
     # expose writer and stop-event so button handlers can stop and save
     SystemContext.h5_writer = h5_writer

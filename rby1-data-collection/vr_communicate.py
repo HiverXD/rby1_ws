@@ -121,7 +121,7 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
                 Settings.right_arm_midpoint1,
                 Settings.left_arm_midpoint1,
                 np.zeros(head_dof),
-                minimum_time=10,
+                minimum_time=7,
                 )
                 started = True
                 
@@ -132,7 +132,7 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
                     Settings.right_arm_midpoint2,
                     Settings.left_arm_midpoint2,
                     np.zeros(head_dof),
-                    minimum_time=10,
+                    minimum_time=7,
                 )
             cbc = (
                 rby.ComponentBasedCommandBuilder()
