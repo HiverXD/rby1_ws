@@ -8,7 +8,6 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R, Slerp
 from gripper import Gripper
 import pickle
-from lerobot_handler import LeRobotDataHandler
 from rclpy.executors import SingleThreadedExecutor  # or MultiThreadedExecutor
 
 # demo writer 
@@ -31,7 +30,6 @@ from setup import Settings, SystemContext
 from robot_communicate import robot_state_callback, connect_rby1
 from vr_communicate import setup_meta_quest_udp_communication, handle_vr_button_event
 
-# lerobot dataset의 action 및 observation 크기 정의를 위한 초기 샘플 데이터
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)-8s - %(message)s"
@@ -82,7 +80,7 @@ def get_config():
         return config
 
 # NOTE
-def start_demo_logger(gripper: Gripper | None, h5_writer, data_handler, robot, fps: int = 30) -> threading.Event:
+def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) -> threading.Event:
     """
     Starts a daemon thread that prints a dict with:
       - robot_state.position
@@ -103,18 +101,11 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, data_handler, robot, f
     # FIXME: create sub node to retrieve image 
     headcam_sub = HeadCamSub()  # subclass of rclpy.node.Node
 
-    # headcam_sub = MultiCamSub(camera_id="head")
-    # right_wrist_sub = MultiCamSub(camera_id="right_wrist")
-    # left_wrist_sub = MultiCamSub(camera_id="left_wrist")
-
     executor = SingleThreadedExecutor()
     executor.add_node(headcam_sub)
-    # executor.add_node(right_wrist_sub)
-    # executor.add_node(left_wrist_sub)
 
     spin_thread = threading.Thread(target=executor.spin, name="ros2_spin", daemon=True)
     spin_thread.start()
-
 
     def _loop():
         logging.info("loop started")
@@ -139,7 +130,6 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, data_handler, robot, f
 
             # 이전 스텝의 robot_target_joints를 현재 robot_pos로 업데이트
             h5_writer.update_previous_target(robot_pos)
-            data_handler.update_previous_target(robot_pos)
             robot_target_joints = robot_pos
 
             # Gripper encoders (actual measured state)
@@ -221,21 +211,12 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, data_handler, robot, f
                 
                 
                 print("demo saved\n")
-                #lerobot data
-                data_to_save = {
-                    "robot_position": robot_pos,
-                    "robot_target_joints": robot_target_joints,
-                    "gripper_state": grip,
-                    "base_state": base_state,
-                    "head_rgb": headcam_sub.curr_frame,
-                }
                 # print("robot_pose shape: ", robot_pos.shape)
                 # print("robot_target_joints shape: ", robot_target_joints.shape)
                 # print("gripper_state shape: ", grip.shape if grip is not None else None)
                 # print("base_state shape: ", base_state.shape if base_state is not None else None)
                 # print("head_rgb shape: ", headcam_sub.curr_frame.shape if headcam_sub.curr_frame is not None else None)
                 
-                data_handler.put(data_to_save)  # 실행이 안됨ㅜㅜㅜ
 
                 h5_writer.put({
                     "ts": time.time(),
@@ -284,8 +265,6 @@ def main(args: argparse.Namespace):
 
     rclpy.init()
 
-    '''power off and stop에서 data_handler.stop() 정의하기 위해 
-    output_path ~ data_handler까지 위치 옮김'''
     # start writing
     
     config = get_config()
@@ -296,20 +275,10 @@ def main(args: argparse.Namespace):
 
     output_path = get_next_h5_path(root_path)
     h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
-    #lerobot data handler
-    data_handler = LeRobotDataHandler(
-        repo_id="rby1_teleop_demo",
-        root_dir=get_next_lerobot_path("/media/nvidia/T7/Demo/LeRobotData"),
-        fps=Settings.rec_fps
-    )
-    
-    
-    data_handler.start()
     
     def power_off_and_stop():
         rec_data.set()  # stop signal for logging thread
         h5_writer.stop()  # save h5 file and exit
-        data_handler.stop()  # save lerobot episode
         robot.power_off(".*")
         # Clean up camera process
         if camera_process is not None:
@@ -348,19 +317,16 @@ def main(args: argparse.Namespace):
     pub_thread = threading.Thread(target=publish_gv, args=(socket,), daemon=True)
     pub_thread.start()
 
-    rec_data = start_demo_logger(gripper, h5_writer, data_handler, robot, fps=Settings.rec_fps)
+    rec_data = start_demo_logger(gripper, h5_writer, robot, fps=Settings.rec_fps)
 
     logging.info("data handler run started")
 
-    # data_handler._run()
 
     # expose writer and stop-event so button handlers can stop and save
     SystemContext.h5_writer = h5_writer
-    SystemContext.lerobot_handler = data_handler
-    SystemContext.rec_stop_event = rec_data
+    SystemContext.rec_stop_event = rec_data 
 
     logging.info(f"output path is {output_path}\n h5 is {h5_writer}\n")
-    logging.info(f"lerobot handler is {data_handler}\n")
 
     dyn_robot = robot.get_dynamics()
     dyn_state = dyn_robot.make_state(["base", "link_torso_5", "link_right_arm_6", "link_left_arm_6"],

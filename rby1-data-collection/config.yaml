@@ -7,3 +7,5 @@ FPS: 10
 
 # dataset conversion
 conversion_task_name: "PuttingCupintotheDish" # 어떤 task의 데모를 변환할 것인지 지정하기 위한 config
+
+user_name : "edipark" # Hugging Face 데이터 push를 위한 user name
