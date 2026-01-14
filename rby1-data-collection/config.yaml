@@ -1,2 +1,9 @@
-task_name: "PuttingCupintotheDish"
+# demo collection
+task_name: "PuttingCupintotheDish" # 데모 저장 디렉토리를 지정하기 위한 config
 demo_root: '/media/nvidia/T7/Demo/'
+
+# dataset config
+FPS: 10
+
+# dataset conversion
+conversion_task_name: "PuttingCupintotheDish" # 어떤 task의 데모를 변환할 것인지 지정하기 위한 config
