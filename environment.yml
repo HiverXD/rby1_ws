@@ -1,0 +1,7 @@
+name: teleop
+channels:
+  - conda-forge
+dependencies:
+  - python==3.10
+  - ipykernel
+prefix: /home/nvidia/miniforge3/envs/teleop
