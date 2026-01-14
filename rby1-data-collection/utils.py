@@ -17,10 +17,3 @@ def get_next_h5_path(base_dir="/home/nvidia/rby1_ws/rby1-data-collection/data"):
     next_index = len(existing)
     # Create new path
     return os.path.join(base_dir, f"demo_{next_index}.h5")
-
-def get_next_lerobot_path(base_dir="/home/nvidia/rby1_ws/rby1-data-collection/data"):
-    # Count existing lerobot demo folders
-    existing = [f for f in os.listdir(base_dir) if f.startswith("demo_")]
-    next_index = len(existing)
-    # Create new path
-    return os.path.join(base_dir, f"demo_{next_index}")

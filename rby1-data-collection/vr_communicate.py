@@ -114,16 +114,17 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
         if robot.get_control_manager_state().control_state != rby.ControlManagerState.ControlState.Idle:
             robot.cancel_control()
         if robot.wait_for_control_ready(1000):
-            if not started and Settings.right_arm_midpoint1 is not None and Settings.left_arm_midpoint1 is not None:
-                movej(
-                robot,
-                np.zeros(torso_dof),
-                Settings.right_arm_midpoint1,
-                Settings.left_arm_midpoint1,
-                np.zeros(head_dof),
-                minimum_time=10,
-                )
-                started = True
+            # zero pose 안 가고 ready pose 자세로 계속 demo 모으면 아래 if문 전부 주석 처리
+            # if not started and Settings.right_arm_midpoint1 is not None and Settings.left_arm_midpoint1 is not None:
+            #     movej(
+            #     robot,
+            #     np.zeros(torso_dof),
+            #     Settings.right_arm_midpoint1,
+            #     Settings.left_arm_midpoint1,
+            #     np.zeros(head_dof),
+            #     minimum_time=7,
+            #     )
+            #     started = True
                 
             if Settings.right_arm_midpoint2 is not None and Settings.left_arm_midpoint2 is not None:
                 movej(
@@ -132,7 +133,7 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
                     Settings.right_arm_midpoint2,
                     Settings.left_arm_midpoint2,
                     np.zeros(head_dof),
-                    minimum_time=10,
+                    minimum_time=7,
                 )
             cbc = (
                 rby.ComponentBasedCommandBuilder()
@@ -185,13 +186,7 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
         except Exception as e:
             logging.warning(f"Failed to stop H5 writer: {e}")
         
-        # lerobot
-        try:
-            if SystemContext.lerobot_handler is not None:
-                SystemContext.lerobot_handler.stop()
-                logging.info("LeRobot handler stopped and saved episode")
-        except Exception as e:
-            logging.warning(f"Failed to save LeRobot episode: {e}")
+
         
 
         SystemContext.vr_state.is_stopped = True
