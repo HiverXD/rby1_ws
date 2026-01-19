@@ -5,9 +5,8 @@ import threading
 import rby1_sdk as rby
 from h5py_writer import H5Writer
 from vr_control_state import VRControlState
-from lerobot_handler import LeRobotDataHandler
+# from lerobot_handler import LeRobotDataHandler
 
-@dataclass(frozen=True)
 class Settings:
     dt: float = 0.1
     hand_offset: float = np.array([0.0, 0.0, 0.0])

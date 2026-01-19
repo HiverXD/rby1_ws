@@ -1,6 +1,7 @@
 # demo collection
 task_name: "PuttingCupintotheDish" # 데모 저장 디렉토리를 지정하기 위한 config
-demo_root: '/media/nvidia/T7/Demo/'
+# demo_root: '/media/nvidia/T7/Demo/' # ssh로 user pc에서 했을 때
+demo_root: 'rby1-data-collection/Demo/'
 
 # dataset config
 FPS: 10
@@ -9,3 +10,9 @@ FPS: 10
 conversion_task_name: "PuttingCupintotheDish" # 어떤 task의 데모를 변환할 것인지 지정하기 위한 config
 
 user_name : "edipark" # Hugging Face 데이터 push를 위한 user name
+
+# connection 
+user_pc_ip: "192.168.0.50:50051" # user pc
+metaquest_ip: "192.168.0.36" # metaquest
+local_ip: "192.168.0.27" # 실제 이 컴퓨터 ip (migrated. user pc 아님)
+# local_ip: "192.168.0.39" # user pc에서 실행할 때

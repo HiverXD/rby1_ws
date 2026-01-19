@@ -636,6 +636,12 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
+    with open("rby1-data-collection/config.yaml", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+        user_pc_ip = config['user_pc_ip']
+        metaquest_ip = config['metaquest_ip']
+        local_ip = config['local_ip']
+
     parser = argparse.ArgumentParser(description="RB-Y1 VR Control Launcher")
 
     parser.add_argument(
@@ -643,20 +649,20 @@ if __name__ == "__main__":
         help="ZMQ server address for the UPC (default: tcp://*:5555)"
     )
     parser.add_argument(
-        "--local_ip", required=True, type=str,
+        "--local_ip", required=False, default=local_ip,type=str,
         help="Local Wi-Fi (or LAN) IP address of the UPC"
     )
     parser.add_argument(
-        "--meta_quest_ip", required=True, type=str,
-        help="Wi-Fi (or LAN) IP address of the Meta Quest"
+        "--meta_quest_ip", required=False, default=metaquest_ip, type=str,
+        help=f"Wi-Fi (or LAN) IP address of the Meta Quest (default: {metaquest_ip})"
     )
     parser.add_argument(
         "--no_gripper", action="store_true",
         help="Run without gripper support"
     )
     parser.add_argument(
-        "--rby1", default="192.168.30.1:50051", type=str,
-        help="gRPC address of the RB-Y1 robot (default: 192.168.30.1:50051)"
+        "--rby1", default=user_pc_ip, type=str,
+        help=f"gRPC address of the RB-Y1 robot (default: {user_pc_ip})"
     )
     parser.add_argument(
         "--rby1_model", default="a", type=str,

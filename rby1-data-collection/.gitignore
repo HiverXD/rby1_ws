@@ -1,1 +1,4 @@
 data/*.mp4
+__pycache__/*
+*.h5
+*.pyc

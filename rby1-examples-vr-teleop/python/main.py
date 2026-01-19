@@ -3,7 +3,7 @@ import logging
 import zmq
 import time
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import rby1_sdk as rby
 import socket
 from typing import Union
@@ -13,6 +13,7 @@ from scipy.spatial.transform import Rotation as R, Slerp
 from gripper import Gripper
 from vr_control_state import VRControlState
 import pickle
+import yaml
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)-8s - %(message)s"
@@ -26,7 +27,6 @@ T_conv = np.array([
 ])
 
 
-@dataclass(frozen=True)
 class Settings:
     dt: float = 0.1
     hand_offset: float = np.array([0.0, 0.0, 0.0])
@@ -37,11 +37,10 @@ class Settings:
     vr_control_local_port: int = 5005
     vr_control_meta_quest_port: int = 6000
 
-    mobile_linear_acceleration_gain: float = 0.15
+    mobile_linear_acceleration_gain: float = -0.15
     mobile_angular_acceleration_gain: float = 0.15
     mobile_linear_damping_gain: float = 0.3
     mobile_angular_damping_gain: float = 0.3
-
 
 class SystemContext:
     robot_model: Union[rby.Model_A, rby.Model_M] = None
@@ -571,6 +570,12 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
+    with open("rby1-data-collection/config.yaml", encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+        user_pc_ip = config['user_pc_ip']
+        metaquest_ip = config['metaquest_ip']
+        local_ip = config['local_ip']
+
     parser = argparse.ArgumentParser(description="RB-Y1 VR Control Launcher")
 
     parser.add_argument(
@@ -578,27 +583,27 @@ if __name__ == "__main__":
         help="ZMQ server address for the UPC (default: tcp://*:5555)"
     )
     parser.add_argument(
-        "--local_ip", required=True, type=str,
+        "--local_ip", required=False, default=local_ip,type=str,
         help="Local Wi-Fi (or LAN) IP address of the UPC"
     )
     parser.add_argument(
-        "--meta_quest_ip", required=True, type=str,
-        help="Wi-Fi (or LAN) IP address of the Meta Quest"
+        "--meta_quest_ip", required=False, default=metaquest_ip, type=str,
+        help=f"Wi-Fi (or LAN) IP address of the Meta Quest (default: {metaquest_ip})"
     )
     parser.add_argument(
         "--no_gripper", action="store_true",
         help="Run without gripper support"
     )
     parser.add_argument(
-        "--rby1", default="192.168.30.1:50051", type=str,
-        help="gRPC address of the RB-Y1 robot (default: 192.168.30.1:50051)"
+        "--rby1", default=user_pc_ip, type=str,
+        help=f"gRPC address of the RB-Y1 robot (default: {user_pc_ip})"
     )
     parser.add_argument(
         "--rby1_model", default="a", type=str,
         help="Model type of the RB-Y1 robot (default: a)"
     )
     parser.add_argument(
-        "--no_head", action="store_true", 
+        "--no_head", action="store_false", 
         help="Run without controlling the head"
     )
     parser.add_argument(
@@ -607,4 +612,12 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    main(args)
+    
+    try:
+        main(args)
+    except KeyboardInterrupt:
+        logging.info("Received keyboard interrupt, shutting down...")
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        raise
+
