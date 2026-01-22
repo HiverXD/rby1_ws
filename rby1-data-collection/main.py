@@ -396,6 +396,18 @@ def main(args: argparse.Namespace):
         if now < next_time:
             time.sleep(next_time - now)
         next_time += Settings.dt
+        
+        if SystemContext.vr_state.joint_positions.size == 0:
+            continue
+        button_event, torso_mode = handle_vr_button_event(robot, args.no_head)
+        
+        if button_event:
+            if stream is not None:
+                stream.cancel()
+                stream = None
+
+        if not SystemContext.vr_state.is_initialized:
+            continue
 
         if "hands" in SystemContext.vr_state.controller_state:
             if "right" in SystemContext.vr_state.controller_state["hands"]:
@@ -411,19 +423,7 @@ def main(args: argparse.Namespace):
                     gripper_target = gripper.get_normalized_target()
                     gripper_target[1] = 1. - left_controller["buttons"]["trigger"]
                     gripper.set_normalized_target(gripper_target)
-
-        if SystemContext.vr_state.joint_positions.size == 0:
-            continue
-        button_event, torso_mode = handle_vr_button_event(robot, args.no_head)
-        
-        if button_event:
-            if stream is not None:
-                stream.cancel()
-                stream = None
-
-        if not SystemContext.vr_state.is_initialized:
-            continue
-
+                    
         if SystemContext.vr_state.is_stopped:
             if stream is not None:
                 stream.cancel()
@@ -447,8 +447,8 @@ def main(args: argparse.Namespace):
         trans_12 = dyn_robot.compute_transformation(dyn_state, 1, 2)
         trans_13 = dyn_robot.compute_transformation(dyn_state, 1, 3)
         center = (trans_12[:3, 3] + trans_13[:3, 3]) / 2
-        yaw = np.atan2(center[1], center[0])
-        pitch = np.atan2(-center[2], center[0]) - np.deg2rad(10)
+        yaw = np.arctan2(center[1], center[0])
+        pitch = np.arctan2(-center[2], center[0]) - np.deg2rad(10)
         yaw = np.clip(yaw, -np.deg2rad(29), np.deg2rad(29))
         pitch = np.clip(pitch, -np.deg2rad(19), np.deg2rad(89))
 

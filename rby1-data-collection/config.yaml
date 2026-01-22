@@ -19,7 +19,7 @@ local_ip: "192.168.0.27" # 실제 이 컴퓨터 ip (migrated. user pc 아님)
 
 remote_gripper_host: "192.168.0.39"
 remote_gripper_port: 5009
-remote_gripper_timeout: 0.2
+remote_gripper_timeout: 30
 
 # Elbow angle threshold for starting condition
 elbow_angle_threshold_deg: 90

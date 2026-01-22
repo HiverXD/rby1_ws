@@ -330,8 +330,9 @@ def main(args: argparse.Namespace):
         trans_12 = dyn_robot.compute_transformation(dyn_state, 1, 2)
         trans_13 = dyn_robot.compute_transformation(dyn_state, 1, 3)
         center = (trans_12[:3, 3] + trans_13[:3, 3]) / 2
-        yaw = np.atan2(center[1], center[0])
-        pitch = np.atan2(-center[2], center[0]) - np.deg2rad(10)
+        # NOTE: NumPy exposes arctan2 (atan2 may not exist depending on numpy version)
+        yaw = np.arctan2(center[1], center[0])
+        pitch = np.arctan2(-center[2], center[0]) - np.deg2rad(10)
         yaw = np.clip(yaw, -np.deg2rad(29), np.deg2rad(29))
         pitch = np.clip(pitch, -np.deg2rad(19), np.deg2rad(89))
 

@@ -15,10 +15,11 @@ class Gripper:
       - {"cmd":"ping"} -> {"ok": true}
       - {"cmd":"set_normalized_target","q":[right,left]}
       - {"cmd":"get_state"} -> {"ok": true, "state":[right,left]}
+      - {"cmd":"homing"} -> {"ok": true}
     """
 
     # Set to True to keep incoming normalized targets as-is (no inversion).
-    GRIPPER_DIRECTION = True
+    GRIPPER_DIRECTION = False
 
     def __init__(self):
         # Resolve remote target (priority: config.yaml -> env -> defaults)
@@ -41,9 +42,7 @@ class Gripper:
 
         # Keep the same attributes other code may touch.
         # In remote mode we store normalized targets directly and return cached values.
-        self.min_q = np.array([0.0, 0.0], dtype=float)
-        self.max_q = np.array([1.0, 1.0], dtype=float)
-        self.target_q = np.array([1.0, 1.0], dtype=float)  # normalized target cache
+        self.target_q = np.array([0.0, 0.0], dtype=float)  # normalized target cache
         self._running = False
         self._thread = None
 
@@ -73,8 +72,13 @@ class Gripper:
         return
 
     def homing(self):
-        # Homing is handled on the remote server (gripper PC). Keep API compatibility.
-        return True
+        resp = self._udp_request({"cmd": "homing", "ts": time.time()}, expect_reply=True)
+        ok = bool(resp and resp.get("ok", False))
+        self.min_q = np.asarray(resp.get("min_q", None), dtype=float).reshape(-1)
+        self.max_q = np.asarray(resp.get("max_q", None), dtype=float).reshape(-1)
+        if not ok:
+            print("[Gripper] Remote homing failed or no response")
+        return ok
 
     def start(self):
         if self._thread is None or not self._thread.is_alive():
@@ -105,23 +109,37 @@ class Gripper:
         return self.target_q
     
     def get_normalized_target(self):
-        # In remote mode target_q is already normalized [0..1].
-        return np.asarray(self.target_q, dtype=float).copy()
+        """
+        Return the *remote* gripper normalized target.
+
+        No local-cache fallback: if the remote server doesn't respond or returns
+        invalid data, raise so callers notice immediately.
+        """
+        resp = self._udp_request({"cmd": "get_normalized_target", "ts": time.time()}, expect_reply=True)
+        if not resp or not resp.get("ok", False):
+            raise RuntimeError("[Gripper] Failed to fetch remote normalized target (no response or ok=false)")
+        target = resp.get("target", None)
+        
+        if target is None:
+            raise RuntimeError("[Gripper] Remote normalized target missing in response")
+        arr = np.asarray(target, dtype=float).reshape(-1)
+        if arr.size != 2:
+            raise RuntimeError(f"[Gripper] Remote normalized target invalid shape: {arr.shape}")
+        arr = np.clip(arr, 0.0, 1.0)
+        self.target_q = arr.copy()
+        
+        return arr
 
     def set_normalized_target(self, normalized_q):
-        q = np.asarray(normalized_q, dtype=float).reshape(-1)
-        if q.size != 2:
-            raise ValueError(f"[Gripper] normalized_q must be size 2, got shape {q.shape}")
-
-        q = np.clip(q, 0.0, 1.0)
-        if not Gripper.GRIPPER_DIRECTION:
-            q = np.array([1.0 - q[0], 1.0 - q[1]], dtype=float)
-
-        self.target_q = q.copy()
-        self._udp_request(
-            {"cmd": "set_normalized_target", "q": q.tolist(), "ts": time.time()},
-            expect_reply=False,
-        )
+        # self.target_q = normalized_q * (self.max_q - self.min_q) + self.min_q
+        if not np.isfinite(self.min_q).all() or not np.isfinite(self.max_q).all():
+            print("[Gripper] Cannot set target. min_q or max_q is not valid.")
+            return
+        
+        if Gripper.GRIPPER_DIRECTION:
+            self.target_q = normalized_q * (self.max_q - self.min_q) + self.min_q
+        else:
+            self.target_q = (1 - normalized_q) * (self.max_q - self.min_q) + self.min_q
 
 
     def get_state(self):

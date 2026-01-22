@@ -1,0 +1,14 @@
+{
+    "version": "3.1.0",
+    "feature_id": "3142722871214187680",
+    "public_key": "JebeomChae.public_key",
+    "signature": "JebeomChae.signature",
+    "license": "JebeomChae.lic",
+    "toolbox": [
+        {
+            "name": "Basic",
+            "type": "PERMANENT",
+            "data": ""
+        }
+    ]
+}
