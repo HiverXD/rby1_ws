@@ -146,9 +146,14 @@ class RGBDSync:
         )
 
     def _rgbd_cb(self, color_msg: Image, depth_msg: Image):
-        # 변환
-        color = rosimg_to_numpy(color_msg)              # HxWx3 uint8 (가정)
-        depth = ros_depth_to_numpy(depth_msg)           # HxW uint16
+        self.node.get_logger().info(f"[{self.cam_id}] RGBD frame received and synchronized for individual camera.")
+
+        try:
+            color = rosimg_to_numpy(color_msg)
+            depth = ros_depth_to_numpy(depth_msg)
+        except Exception as e:
+            self.node.get_logger().error(f"[{self.cam_id}] convert failed: {e}")
+            return
 
         t = stamp_to_float(color_msg.header.stamp)
         stamp = (color_msg.header.stamp.sec, color_msg.header.stamp.nanosec)
@@ -167,9 +172,7 @@ class MultiCamRGBDSync(Node):
     """
     def __init__(
         self,
-        cam_ids: List[str],
-        topic_pattern_color: str = "/{cam}/camera/color/image_raw",
-        topic_pattern_depth: str = "/{cam}/camera/depth/image_rect_raw",
+        cameras: Dict[str, Dict[str, str]], # e.g. {"cam_name": {"color": "/topic", "depth": "/topic"}}
         rgbd_slop: float = 0.05,          # 각 카메라 내부 RGB-D sync 허용오차
         rgbd_queue: int = 20,
         multicam_tol: float = 0.06,       # 카메라 간 동기 매칭 허용오차 (FPS10이면 50~80ms부터 시도 권장)
@@ -177,12 +180,15 @@ class MultiCamRGBDSync(Node):
     ):
         super().__init__("multi_cam_rgbd_sync")
 
-        self.cam_ids = cam_ids
+        # 실제 토픽 확인
+        # self.create_timer(2.0, self._print_topics)
+
+        self.cam_ids = list(cameras.keys())
         self.multicam_tol = multicam_tol
         self.max_buf = max_buf
 
         self._lock = threading.Lock()
-        self._buf: Dict[str, deque[RGBDFrame]] = {cid: deque() for cid in cam_ids}
+        self._buf: Dict[str, deque[RGBDFrame]] = {cid: deque() for cid in self.cam_ids}
 
         self._got_first_set = threading.Event()
         self._last_set: Optional[Dict[str, RGBDFrame]] = None
@@ -190,9 +196,13 @@ class MultiCamRGBDSync(Node):
 
         # 카메라별 RGB-D sync 생성
         self._per_cam = []
-        for cid in cam_ids:
-            c_topic = topic_pattern_color.format(cam=cid)
-            d_topic = topic_pattern_depth.format(cam=cid)
+        for cid, topics in cameras.items():
+            c_topic = topics.get("color")
+            d_topic = topics.get("depth")
+            if not c_topic or not d_topic:
+                self.get_logger().warning(f"Skipping camera '{cid}' due to missing color or depth topic.")
+                continue
+
             self._per_cam.append(
                 RGBDSync(
                     node=self,
@@ -206,10 +216,16 @@ class MultiCamRGBDSync(Node):
             )
 
         self.get_logger().info(
-            f"[MultiCam] cams={cam_ids}, multicam_tol={multicam_tol}s, max_buf={max_buf}"
+            f"[MultiCam] cams={self.cam_ids}, multicam_tol={multicam_tol}s, max_buf={max_buf}"
         )
 
     # ----- Public API -----
+    def _print_topics(self):
+        for name, types in self.get_topic_names_and_types():
+            if any(k in name for k in ("image", "camera", "depth", "color")):
+                self.get_logger().info(f"TOPIC: {name} types={types}")
+
+
     def get_synced_set_copy(self):
         """
         가장 최근에 완성된 '동일 시각' 3카메라 세트를 복사본으로 반환.
@@ -219,15 +235,7 @@ class MultiCamRGBDSync(Node):
             if self._last_set is None:
                 return None, None
 
-            out = {}
-            for cid, fr in self._last_set.items():
-                out[cid] = (
-                    fr.color.copy(),
-                    fr.depth.copy(),
-                    fr.stamp,
-                    fr.seq,
-                    fr.t,
-                )
+            out = copy.deepcopy(self._last_set)
             return out, self._set_seq
 
     def on_synced_rgbd_set(self, synced: Dict[str, RGBDFrame], set_seq: int):
@@ -237,7 +245,8 @@ class MultiCamRGBDSync(Node):
         """
         # 예: timestamp 출력
         ts = {cid: synced[cid].t for cid in self.cam_ids}
-        self.get_logger().info(f"[SYNCED #{set_seq}] t={ts}")
+        self.get_logger().info(f"[MultiCamRGBDSync: SYNCED #{set_seq}] All cameras ({list(synced.keys())}) synchronized at t={ts}")
+
 
     # ----- Internal -----
     def _on_rgbd_frame(self, cam_id: str, frame: RGBDFrame):
@@ -323,24 +332,127 @@ class MultiCamRGBDSync(Node):
             while len(q) > 0 and q[0].t < cutoff:
                 q.popleft()
 
-def start_realsense_camera():
-    """Stop existing ROS nodes/topics that may publish camera data, then start the
-    RealSense ROS2 camera launch in a subprocess. This function attempts several
-    graceful shutdown steps:
+@dataclass
+class RealSenseInstance:
+    serial_no: str
+    namespace: str
+    camera_name: str ="camera"
+    tf_prefix: str = ""  # 필요하면 사용
+    process: Optional[subprocess.Popen] = None
 
-    1. Try to gracefully shutdown nodes via lifecycle (if supported).
-    2. Kill processes that contain common ROS2 launch/run signatures or the
-       'realsense' keyword.
-    3. Finally, launch the RealSense node via ros2 launch.
+ROS_SETUP = "/opt/ros/jazzy/setup.bash"
 
-    Returns the subprocess.Popen process for the launched camera, or None on failure.
+def _launch_realsense(instance: RealSenseInstance,
+                      extra_launch_args: str = "",
+                      startup_wait_s: float = 3.0) -> Optional[subprocess.Popen]:
+    """
+    Launch one RealSense camera with unique namespace/camera_name (and serial_no).
+    """
+    # rs_launch.py가 지원하는 launch arg 이름은 보통 serial_no, camera_name, namespace 등을 씁니다.
+    # (환경에 따라 serial_no 대신 serial_number 등을 쓰는 경우도 있어요)
+    launch_args = [
+        f"serial_no:={shlex.quote(instance.serial_no)}",
+        f"camera_name:={shlex.quote(instance.camera_name)}",
+        f"namespace:={shlex.quote(instance.namespace)}",
+    ]
+    if instance.tf_prefix:
+        launch_args.append(f"tf_prefix:={shlex.quote(instance.tf_prefix)}")
+
+    if extra_launch_args:
+        launch_args.append(extra_launch_args.strip())
+
+    cmd = (
+        "bash -lc "
+        + shlex.quote(
+            f"source {ROS_SETUP} && "
+            f"ros2 launch realsense2_camera rs_launch.py {' '.join(launch_args)}"
+        )
+    )
+
+    try:
+        p = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setpgrp  # 각 카메라를 별도 프로세스 그룹으로
+        )
+        logging.info(
+            f"Started RealSense: serial={instance.serial_no}, "
+            f"ns={instance.namespace}, name={instance.camera_name}, pid={p.pid}"
+        )
+        time.sleep(startup_wait_s)
+        return p
+    except Exception as e:
+        logging.error(f"Failed to launch RealSense {instance.serial_no}: {e}")
+        return None
+
+def stop_realsense_cameras(instances: List[RealSenseInstance], timeout_s: float = 2.0):
+    """
+    Stop only the processes we started (no pkill).
+    """
+    for inst in instances:
+        p = inst.process
+        if not p:
+            continue
+        try:
+            pgid = os.getpgid(p.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            logging.info(f"SIGTERM sent: serial={inst.serial_no}, pgid={pgid}")
+        except Exception as e:
+            logging.warning(f"SIGTERM failed for {inst.serial_no}: {e}")
+
+    # wait a bit
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        alive = [inst for inst in instances if inst.process and inst.process.poll() is None]
+        if not alive:
+            break
+        time.sleep(0.1)
+
+    # force kill leftovers
+    for inst in instances:
+        p = inst.process
+        if p and p.poll() is None:
+            try:
+                pgid = os.getpgid(p.pid)
+                os.killpg(pgid, signal.SIGKILL)
+                logging.info(f"SIGKILL sent: serial={inst.serial_no}, pgid={pgid}")
+            except Exception as e:
+                logging.warning(f"SIGKILL failed for {inst.serial_no}: {e}")
+
+def start_realsense_cameras(camera_configs: List[RealSenseInstance],
+                            extra_launch_args: str = "",
+                            stop_existing_started_by_me: bool = True) -> List[RealSenseInstance]:
+    """
+    Start multiple cameras. Returns list with .process filled.
+    """
+    # 여기서 "기존 ROS2 노드 전체 종료" 같은 건 멀티카메라에선 위험해서 권장하지 않습니다.
+    # 정말 필요하면 '내가 띄운 프로세스만' stop_realsense_instances로 관리하세요.
+
+    instances = camera_configs
+
+    # (옵션) 같은 코드가 이전에 띄운 인스턴스들을 외부에서 넘겨받아 stop 할 수도 있지만,
+    # 이 함수 단독 실행이라면 stop_existing_started_by_me는 별 의미가 없습니다.
+    # 보통은 호출부에서 이전 instances를 들고 있다가 stop_realsense_instances를 호출합니다.
+
+    for inst in instances:
+        inst.process = _launch_realsense(inst, extra_launch_args=extra_launch_args)
+
+    # 실패한 것만 걸러내고 싶으면 여기서 필터링 가능
+    return instances
+
+
+def start_realsense_camera(instance, log_dir="/tmp"):
+    """
+    Start RealSense ROS2 camera launch in a subprocess and write logs to file.
+
+    - Captures BOTH stdout and stderr into a log file.
+    - Uses bash -lc for more reliable environment sourcing.
+    - Uses stdbuf to reduce buffering so logs appear immediately.
     """
     def _stop_all_ros_nodes(timeout: float = 3.0):
-        """Attempt to stop running ROS2 nodes and camera publishers.
-
-        This helper is best-effort and will not raise on failure; it logs actions.
-        """
-        # 1) List ROS2 nodes
+        # (원래 내용 유지) - 멀티 카메라에서는 pkill가 위험하니 나중에 제거 추천
         try:
             out = subprocess.check_output("ros2 node list", shell=True, stderr=subprocess.DEVNULL, text=True, timeout=2)
             nodes = [ln.strip() for ln in out.splitlines() if ln.strip()]
@@ -349,19 +461,18 @@ def start_realsense_camera():
             logging.debug(f"ros2 node list failed: {e}")
             nodes = []
 
-        # 2) Try lifecycle shutdown for lifecycle-enabled nodes
         for n in nodes:
             try:
-                # attempt to put node into shutdown (if supports lifecycle)
-                subprocess.run(f"ros2 lifecycle set {shlex.quote(n)} shutdown", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+                subprocess.run(
+                    f"ros2 lifecycle set {shlex.quote(n)} shutdown",
+                    shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
+                )
                 logging.info(f"Lifecycle shutdown requested for node {n}")
             except Exception:
                 pass
 
-        # 3) Small pause to let nodes exit
         time.sleep(min(1.0, timeout))
 
-        # 4) Kill processes that look like ROS2 launch/run or contain 'realsense'
         try:
             ps = subprocess.check_output(['ps', 'aux'], text=True)
         except Exception:
@@ -369,12 +480,10 @@ def start_realsense_camera():
 
         killed = []
         for line in ps.splitlines():
-            # look for common ros2 invocation patterns or realsense
             if 'ros2' in line or 'realsense' in line or 'rs_launch' in line or 'realsense2_camera' in line:
                 try:
                     parts = line.split()
                     pid = int(parts[1])
-                    # avoid killing our own process
                     if pid == os.getpid():
                         continue
                     try:
@@ -392,33 +501,55 @@ def start_realsense_camera():
         if killed:
             logging.info(f"Terminated processes matching ros2/realsense: {killed}")
 
-        # 5) As a final fallback, try pkill for realsense or ros2 launch processes
         try:
             subprocess.run("pkill -f realsense", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run("pkill -f 'ros2 launch'", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
 
-    # attempt to stop existing ROS nodes/topics first
+    # stop existing ROS nodes/topics first
     try:
         logging.info("Stopping any existing ROS2 nodes/topics that may publish camera data...")
         _stop_all_ros_nodes(timeout=3.0)
     except Exception as e:
         logging.warning(f"Failed while attempting to stop existing ROS nodes: {e}")
 
-    # Now launch the RealSense camera via ros2 launch
+    # ---- logging setup ----
+    os.makedirs(log_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ns = instance.namespace.strip("/").replace("/", "_") if getattr(instance, "namespace", "") else "camera"
+    log_path = os.path.join(log_dir, f"realsense_{ns}_{ts}.log")
+
+    # Now launch RealSense camera via ros2 launch (with unbuffered logging)
     try:
-        cmd = "bash -c 'source /opt/ros/humble/setup.bash && ros2 launch realsense2_camera rs_launch.py'"
+        # stdbuf: force line-buffering for stdout/stderr so logs flush quickly
+        # bash -lc: more reliable for `source` and environment setup
+        cmd = (
+            "bash -lc "
+            + shlex.quote(
+                "source /opt/ros/jazzy/setup.bash && "
+                "stdbuf -oL -eL "
+                "ros2 launch realsense2_camera rs_launch.py "
+                f"2>&1"
+            )
+        )
+
+        log_f = open(log_path, "w", buffering=1)  # line-buffered
         process = subprocess.Popen(
             cmd,
             shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setpgrp  # Create new process group
+            stdout=log_f,           # stdout -> file
+            stderr=subprocess.STDOUT,  # stderr -> stdout -> file
+            preexec_fn=os.setpgrp
         )
+
         logging.info(f"Started RealSense camera node (PID: {process.pid})")
-        time.sleep(3)  # Wait for camera to initialize
-        return process
+        logging.info(f"RealSense log file: {log_path}")
+
+        time.sleep(3)
+        return process, log_path
+
     except Exception as e:
         logging.error(f"Failed to start RealSense camera: {e}")
-        return None
+        return None, log_path
+

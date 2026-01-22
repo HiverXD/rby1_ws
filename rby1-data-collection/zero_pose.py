@@ -4,6 +4,7 @@ import argparse
 import numpy as np
 import logging
 from setup import Settings
+from utils import elbows_bending_check
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -24,7 +25,7 @@ def main(address, model, power, servo):
     right_arm_midpoint2 = Settings.right_arm_midpoint2
     left_arm_midpoint2 = Settings.left_arm_midpoint2
 
-    if (right_arm_midpoint1 is not None) and (left_arm_midpoint1 is not None):
+    if (right_arm_midpoint2 is not None) and (left_arm_midpoint2 is not None):
         movej(
             robot,
             np.zeros(torso_dof),
@@ -34,6 +35,7 @@ def main(address, model, power, servo):
             minimum_time=10,
         )
 
+    if (right_arm_midpoint1 is not None) and (left_arm_midpoint1 is not None):
         movej(
             robot,
             np.zeros(torso_dof),
@@ -42,7 +44,7 @@ def main(address, model, power, servo):
             np.zeros(head_dof),
             minimum_time=10,
         )
-
+    
     movej(
         robot,
         np.zeros(torso_dof),

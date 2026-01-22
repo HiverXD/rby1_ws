@@ -6,9 +6,9 @@ import threading
 import rby1_sdk as rby
 import numpy as np
 from scipy.spatial.transform import Rotation as R, Slerp
-from gripper import Gripper
+from remote_gripper import Gripper
 import pickle
-from rclpy.executors import SingleThreadedExecutor  # or MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 
 # demo writer 
 from h5py_writer import H5Writer
@@ -25,7 +25,7 @@ from utils import *
 import threading
 from helper import * 
 
-from camera import HeadCamSub, start_realsense_camera
+from camera import HeadCamSub, MultiCamRGBDSync, start_realsense_camera, start_realsense_cameras, stop_realsense_cameras, RealSenseInstance
 from setup import Settings, SystemContext
 from robot_communicate import robot_state_callback, connect_rby1
 from vr_communicate import setup_meta_quest_udp_communication, handle_vr_button_event
@@ -98,13 +98,30 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
     # Import PCD utilities
     from pcd_utils import rgbd_to_pointcloud, REALSENSE_D435_INTRINSICS, REALSENSE_D435_INTRINSICS_848x480
 
-    # FIXME: create sub node to retrieve image 
-    headcam_sub = HeadCamSub()  # subclass of rclpy.node.Node
+    # Get camera configuration from the config file
+    cameras_to_sync = config.get('cameras', {})
+    if not cameras_to_sync:
+        logging.warning("No camera configuration found in config.yaml. Camera streams will not be processed.")
+    
+    # Get the list of camera names from config, which will be used to access data
+    cam_ids = config.get('cameras', []).keys()
+    cam_node_num = config.get('cam_node_num', 6)
 
-    executor = SingleThreadedExecutor()
-    executor.add_node(headcam_sub)
+    node = MultiCamRGBDSync(
+        cameras=cameras_to_sync,
+        rgbd_slop=0.05,
+        rgbd_queue=20,
+        multicam_tol=0.06,
+        max_buf=50,
+    )
+    executor = MultiThreadedExecutor(num_threads= cam_node_num * len(cam_ids))
+    executor.add_node(node)
 
-    spin_thread = threading.Thread(target=executor.spin, name="ros2_spin", daemon=True)
+    spin_thread = threading.Thread(
+        target=executor.spin,
+        name="ros2_spin",
+        daemon=True
+    )
     spin_thread.start()
 
     def _loop():
@@ -113,11 +130,29 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
 
         while not stop_event.is_set():
             # Thread-safe snapshot of latest camera frames
-            frame, frame_stamp, frame_seq = headcam_sub.get_frame_copy()
-            depth, depth_stamp = headcam_sub.get_depth_copy()
-            # Robot joint positions - 현재 포지션 읽기
+            synced, set_seq = node.get_synced_set_copy()
 
+            if synced is None: # synced 자체가 None일 경우만 확인
+                continue
+
+            # Check if all cameras defined in cam_ids are present in the synced set
+            if not all(cid in synced for cid in cam_ids):
+                logging.warning(f"Not all cameras ({cam_ids}) were present in the synced set. Skipping.")
+                continue
+
+            # Use the first camera in cam_ids for primary tasks like PCD generation.
+            primary_cam_id = cam_ids[0]
+            primary_cam_data = synced[primary_cam_id]
+            
+            frame = primary_cam_data.color
+            depth = primary_cam_data.depth
+            frame_stamp = primary_cam_data.stamp
+            frame_seq = primary_cam_data.seq
+            frame_t = primary_cam_data.t
+
+            # Robot joint positions - 현재 포지션 읽기
             robot_pos = None
+
             try:
                 if SystemContext.vr_state.joint_positions is not None:
                     # robot_pos = np.array(SystemContext.robot_state.position, dtype=float)
@@ -218,20 +253,27 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 # print("head_rgb shape: ", headcam_sub.curr_frame.shape if headcam_sub.curr_frame is not None else None)
                 
 
-                h5_writer.put({
+                # Create a dynamic dictionary to hold data for all cameras
+                data_to_save = {
                     "ts": time.time(),
                     "robot_position": robot_pos,
                     "robot_target_joints": robot_target_joints,
                     "gripper_state": grip,
                     "gripper_target": gripper.get_normalized_target() if gripper else None,
                     "base_state" : base_state,
-                    "head_rgb": headcam_sub.curr_frame,
-                    "head_rgb_ts": headcam_sub.last_stamp[1] if headcam_sub.last_stamp else None,
-                    "head_depth": headcam_sub.curr_depth,
-                    "head_depth_ts": headcam_sub.last_depth_stamp[1] if headcam_sub.last_depth_stamp else None,
                     "pcd_points": pcd_points,
                     "pcd_colors": pcd_colors
-                })
+                }
+
+                # Iterate through all available cameras and add their data to the dictionary
+                for cam_id in cam_ids:
+                    cam_data = synced[cam_id]
+                    data_to_save[f"{cam_id}_rgb"] = cam_data.color
+                    data_to_save[f"{cam_id}_rgb_ts"] = cam_data.t
+                    data_to_save[f"{cam_id}_depth"] = cam_data.depth
+                    data_to_save[f"{cam_id}_depth_ts"] = cam_data.t
+                    logging.info(f"{cam_data} color frame is {cam_data.color}")
+                h5_writer.put(data_to_save)
 
             # pacing at ~30 FPS with drift correction
             next_t += period
@@ -261,13 +303,26 @@ def main(args: argparse.Namespace):
     logging.info(f"Use Head             : {'No' if args.no_head else 'Yes'}")
 
     # Start RealSense camera node
-    camera_process = start_realsense_camera()
+    # Get camera configuration from the config file (for serial numbers)
+    config = get_config() # Moved up to get config earlier
 
+    # Define camera configurations using serial numbers provided by the user
+    
+    cam_configs = []
+    cameras_config = config.get("cameras")
+    for cam_id, spec in cameras_config.items():
+        cam_configs.append(RealSenseInstance(
+            serial_no=spec["serial"],
+            namespace=spec["namespace"]
+        ))
+
+    # camera_processes = start_realsense_camera()
+    camera_processes, log_path = start_realsense_cameras(cam_configs, extra_launch_args="enable_sync:=true align_depth.enable:=true")
+    print(f"log: {log_path}")
     rclpy.init()
 
     # start writing
     
-    config = get_config()
     root_path = os.path.join(config['demo_root'], config['task_name'])
 
     # 디렉토리가 없으면 생성 (이미 있으면 아무 동작 안 함)
@@ -280,15 +335,10 @@ def main(args: argparse.Namespace):
         rec_data.set()  # stop signal for logging thread
         h5_writer.stop()  # save h5 file and exit
         robot.power_off(".*")
-        # Clean up camera process
-        if camera_process is not None:
-            try:
-                logging.info("Shutting down RealSense camera node...")
-                camera_process.terminate()
-                camera_process.wait(timeout=5)
-            except Exception as e:
-                logging.warning(f"Failed to cleanly terminate camera process: {e}")
-                camera_process.kill()
+        # Clean up camera processes
+        if camera_processes: # Check if the dictionary is not empty
+            logging.info("Shutting down RealSense camera nodes...")
+            stop_realsense_cameras(camera_processes)
 
     socket = open_zmq_pub_socket(args.server)
     robot = connect_rby1(args.rby1, args.rby1_model, args.no_head)
@@ -366,7 +416,7 @@ def main(args: argparse.Namespace):
             continue
         button_event, torso_mode = handle_vr_button_event(robot, args.no_head)
         
-        if button_event:  #실행이 안됨
+        if button_event:
             if stream is not None:
                 stream.cancel()
                 stream = None
