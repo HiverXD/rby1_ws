@@ -306,8 +306,13 @@ def main(args: argparse.Namespace):
     # Get camera configuration from the config file (for serial numbers)
     config = get_config() # Moved up to get config earlier
 
+    # Define a directory for camera logs inside the project's demo root
+    root_path = os.path.join(config['demo_root'], config['task_name'])
+    os.makedirs(root_path, exist_ok=True)
+    camera_log_dir = os.path.join(root_path, "camera_logs")
+    logging.info(f"Camera logs will be stored in: {camera_log_dir}")
+
     # Define camera configurations using serial numbers provided by the user
-    
     cam_configs = []
     cameras_config = config.get("cameras")
     for cam_id, spec in cameras_config.items():
@@ -316,18 +321,16 @@ def main(args: argparse.Namespace):
             namespace=spec["namespace"]
         ))
 
-    # camera_processes = start_realsense_camera()
-    camera_processes, log_path = start_realsense_cameras(cam_configs, extra_launch_args="enable_sync:=true align_depth.enable:=true")
-    print(f"log: {log_path}")
+    # Correctly call start_realsense_cameras and pass the log directory
+    # camera_processes = start_realsense_cameras(
+    #     cam_configs,
+    #     log_dir=camera_log_dir,
+    #     extra_launch_args="enable_sync:=true align_depth.enable:=true"
+    # )
+
     rclpy.init()
 
     # start writing
-    
-    root_path = os.path.join(config['demo_root'], config['task_name'])
-
-    # 디렉토리가 없으면 생성 (이미 있으면 아무 동작 안 함)
-    os.makedirs(root_path, exist_ok=True)
-
     output_path = get_next_h5_path(root_path)
     h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
     
@@ -336,9 +339,9 @@ def main(args: argparse.Namespace):
         h5_writer.stop()  # save h5 file and exit
         robot.power_off(".*")
         # Clean up camera processes
-        if camera_processes: # Check if the dictionary is not empty
-            logging.info("Shutting down RealSense camera nodes...")
-            stop_realsense_cameras(camera_processes)
+        # if camera_processes: # Check if the dictionary is not empty
+        #     logging.info("Shutting down RealSense camera nodes...")
+        #     stop_realsense_cameras(camera_processes)
 
     socket = open_zmq_pub_socket(args.server)
     robot = connect_rby1(args.rby1, args.rby1_model, args.no_head)
@@ -396,7 +399,7 @@ def main(args: argparse.Namespace):
         if now < next_time:
             time.sleep(next_time - now)
         next_time += Settings.dt
-        
+
         if SystemContext.vr_state.joint_positions.size == 0:
             continue
         button_event, torso_mode = handle_vr_button_event(robot, args.no_head)
@@ -409,27 +412,28 @@ def main(args: argparse.Namespace):
         if not SystemContext.vr_state.is_initialized:
             continue
 
-        if "hands" in SystemContext.vr_state.controller_state:
-            if "right" in SystemContext.vr_state.controller_state["hands"]:
-                right_controller = SystemContext.vr_state.controller_state["hands"]["right"]
-                if gripper is not None:
-                    gripper_target = gripper.get_normalized_target()
-                    gripper_target[0] = right_controller["buttons"]["trigger"]
-                    gripper.set_normalized_target(gripper_target)
-
-            if "left" in SystemContext.vr_state.controller_state["hands"]:
-                left_controller = SystemContext.vr_state.controller_state["hands"]["left"]
-                if gripper is not None:
-                    gripper_target = gripper.get_normalized_target()
-                    gripper_target[1] = 1. - left_controller["buttons"]["trigger"]
-                    gripper.set_normalized_target(gripper_target)
-                    
         if SystemContext.vr_state.is_stopped:
             if stream is not None:
                 stream.cancel()
                 stream = None
             SystemContext.vr_state.is_initialized = False
             continue
+
+        # Gripper: update cached target and send (avoid remote get_normalized_target() RPC every tick)
+        if "hands" in SystemContext.vr_state.controller_state:
+            if "right" in SystemContext.vr_state.controller_state["hands"]:
+                right_controller = SystemContext.vr_state.controller_state["hands"]["right"]
+                if gripper is not None:
+                    gripper_target = gripper.get_target()
+                    gripper_target[0] = right_controller["buttons"]["trigger"]
+                    gripper.set_normalized_target(gripper_target)
+
+            if "left" in SystemContext.vr_state.controller_state["hands"]:
+                left_controller = SystemContext.vr_state.controller_state["hands"]["left"]
+                if gripper is not None:
+                    gripper_target = gripper.get_target()
+                    gripper_target[1] = 1. - left_controller["buttons"]["trigger"]
+                    gripper.set_normalized_target(gripper_target)
 
         logging.info(f"{SystemContext.vr_state.center_of_mass = }")
 

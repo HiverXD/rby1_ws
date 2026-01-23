@@ -15,6 +15,7 @@ from utils import rosimg_to_numpy
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple, List
+from datetime import datetime
 
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 
@@ -340,9 +341,9 @@ class RealSenseInstance:
     tf_prefix: str = ""  # 필요하면 사용
     process: Optional[subprocess.Popen] = None
 
-ROS_SETUP = "/opt/ros/jazzy/setup.bash"
 
 def _launch_realsense(instance: RealSenseInstance,
+                      log_dir: str,
                       extra_launch_args: str = "",
                       startup_wait_s: float = 3.0) -> Optional[subprocess.Popen]:
     """
@@ -361,30 +362,42 @@ def _launch_realsense(instance: RealSenseInstance,
     if extra_launch_args:
         launch_args.append(extra_launch_args.strip())
 
+    # --- logging setup ---
+    os.makedirs(log_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Sanitize namespace for filename
+    ns = instance.namespace.strip("/").replace("/", "_") if instance.namespace else "camera"
+    log_path = os.path.join(log_dir, f"realsense_{ns}_{ts}.log")
+
     cmd = (
         "bash -lc "
         + shlex.quote(
-            f"source {ROS_SETUP} && "
-            f"ros2 launch realsense2_camera rs_launch.py {' '.join(launch_args)}"
+            # Use stdbuf for line-buffering to get logs faster
+            f"stdbuf -oL -eL ros2 launch realsense2_camera rs_launch.py {' '.join(launch_args)}"
         )
     )
 
     try:
+        # Open log file (line-buffered)
+        log_f = open(log_path, "w", buffering=1)
         p = subprocess.Popen(
             cmd,
             shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setpgrp  # 각 카메라를 별도 프로세스 그룹으로
+            stdout=log_f,
+            stderr=log_f, # Redirect both stdout and stderr to the same file
+            preexec_fn=os.setpgrp
         )
         logging.info(
             f"Started RealSense: serial={instance.serial_no}, "
             f"ns={instance.namespace}, name={instance.camera_name}, pid={p.pid}"
         )
+        logging.info(f"Log file for this camera: {log_path}")
         time.sleep(startup_wait_s)
         return p
     except Exception as e:
         logging.error(f"Failed to launch RealSense {instance.serial_no}: {e}")
+        if 'log_f' in locals() and log_f:
+            log_f.close()
         return None
 
 def stop_realsense_cameras(instances: List[RealSenseInstance], timeout_s: float = 2.0):
@@ -422,37 +435,39 @@ def stop_realsense_cameras(instances: List[RealSenseInstance], timeout_s: float 
                 logging.warning(f"SIGKILL failed for {inst.serial_no}: {e}")
 
 def start_realsense_cameras(camera_configs: List[RealSenseInstance],
-                            extra_launch_args: str = "",
-                            stop_existing_started_by_me: bool = True) -> List[RealSenseInstance]:
+                            log_dir: str = "/tmp/realsense_logs",
+                            extra_launch_args: str = "") -> List[RealSenseInstance]:
     """
     Start multiple cameras. Returns list with .process filled.
+    Logs for each camera will be stored in log_dir.
     """
-    # 여기서 "기존 ROS2 노드 전체 종료" 같은 건 멀티카메라에선 위험해서 권장하지 않습니다.
-    # 정말 필요하면 '내가 띄운 프로세스만' stop_realsense_instances로 관리하세요.
-
     instances = camera_configs
-
-    # (옵션) 같은 코드가 이전에 띄운 인스턴스들을 외부에서 넘겨받아 stop 할 수도 있지만,
-    # 이 함수 단독 실행이라면 stop_existing_started_by_me는 별 의미가 없습니다.
-    # 보통은 호출부에서 이전 instances를 들고 있다가 stop_realsense_instances를 호출합니다.
-
     for inst in instances:
-        inst.process = _launch_realsense(inst, extra_launch_args=extra_launch_args)
+        # Pass log_dir to the launch function
+        inst.process = _launch_realsense(inst, log_dir=log_dir, extra_launch_args=extra_launch_args)
 
-    # 실패한 것만 걸러내고 싶으면 여기서 필터링 가능
+    # Return the instances with the .process attribute populated
     return instances
 
 
-def start_realsense_camera(instance, log_dir="/tmp"):
-    """
-    Start RealSense ROS2 camera launch in a subprocess and write logs to file.
+def start_realsense_camera():
+    """Stop existing ROS nodes/topics that may publish camera data, then start the
+    RealSense ROS2 camera launch in a subprocess. This function attempts several
+    graceful shutdown steps:
 
-    - Captures BOTH stdout and stderr into a log file.
-    - Uses bash -lc for more reliable environment sourcing.
-    - Uses stdbuf to reduce buffering so logs appear immediately.
+    1. Try to gracefully shutdown nodes via lifecycle (if supported).
+    2. Kill processes that contain common ROS2 launch/run signatures or the
+       'realsense' keyword.
+    3. Finally, launch the RealSense node via ros2 launch.
+
+    Returns the subprocess.Popen process for the launched camera, or None on failure.
     """
     def _stop_all_ros_nodes(timeout: float = 3.0):
-        # (원래 내용 유지) - 멀티 카메라에서는 pkill가 위험하니 나중에 제거 추천
+        """Attempt to stop running ROS2 nodes and camera publishers.
+
+        This helper is best-effort and will not raise on failure; it logs actions.
+        """
+        # 1) List ROS2 nodes
         try:
             out = subprocess.check_output("ros2 node list", shell=True, stderr=subprocess.DEVNULL, text=True, timeout=2)
             nodes = [ln.strip() for ln in out.splitlines() if ln.strip()]
@@ -461,18 +476,19 @@ def start_realsense_camera(instance, log_dir="/tmp"):
             logging.debug(f"ros2 node list failed: {e}")
             nodes = []
 
+        # 2) Try lifecycle shutdown for lifecycle-enabled nodes
         for n in nodes:
             try:
-                subprocess.run(
-                    f"ros2 lifecycle set {shlex.quote(n)} shutdown",
-                    shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
-                )
+                # attempt to put node into shutdown (if supports lifecycle)
+                subprocess.run(f"ros2 lifecycle set {shlex.quote(n)} shutdown", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
                 logging.info(f"Lifecycle shutdown requested for node {n}")
             except Exception:
                 pass
 
+        # 3) Small pause to let nodes exit
         time.sleep(min(1.0, timeout))
 
+        # 4) Kill processes that look like ROS2 launch/run or contain 'realsense'
         try:
             ps = subprocess.check_output(['ps', 'aux'], text=True)
         except Exception:
@@ -480,10 +496,12 @@ def start_realsense_camera(instance, log_dir="/tmp"):
 
         killed = []
         for line in ps.splitlines():
+            # look for common ros2 invocation patterns or realsense
             if 'ros2' in line or 'realsense' in line or 'rs_launch' in line or 'realsense2_camera' in line:
                 try:
                     parts = line.split()
                     pid = int(parts[1])
+                    # avoid killing our own process
                     if pid == os.getpid():
                         continue
                     try:
@@ -501,55 +519,34 @@ def start_realsense_camera(instance, log_dir="/tmp"):
         if killed:
             logging.info(f"Terminated processes matching ros2/realsense: {killed}")
 
+        # 5) As a final fallback, try pkill for realsense or ros2 launch processes
         try:
             subprocess.run("pkill -f realsense", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run("pkill -f 'ros2 launch'", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
 
-    # stop existing ROS nodes/topics first
+    # attempt to stop existing ROS nodes/topics first
     try:
         logging.info("Stopping any existing ROS2 nodes/topics that may publish camera data...")
         _stop_all_ros_nodes(timeout=3.0)
     except Exception as e:
         logging.warning(f"Failed while attempting to stop existing ROS nodes: {e}")
 
-    # ---- logging setup ----
-    os.makedirs(log_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    ns = instance.namespace.strip("/").replace("/", "_") if getattr(instance, "namespace", "") else "camera"
-    log_path = os.path.join(log_dir, f"realsense_{ns}_{ts}.log")
-
-    # Now launch RealSense camera via ros2 launch (with unbuffered logging)
+    # Now launch the RealSense camera via ros2 launch
     try:
-        # stdbuf: force line-buffering for stdout/stderr so logs flush quickly
-        # bash -lc: more reliable for `source` and environment setup
-        cmd = (
-            "bash -lc "
-            + shlex.quote(
-                "source /opt/ros/jazzy/setup.bash && "
-                "stdbuf -oL -eL "
-                "ros2 launch realsense2_camera rs_launch.py "
-                f"2>&1"
-            )
-        )
-
-        log_f = open(log_path, "w", buffering=1)  # line-buffered
+        cmd = "bash -c 'source /opt/ros/humble/setup.bash && ros2 launch realsense2_camera rs_launch.py'"
         process = subprocess.Popen(
             cmd,
             shell=True,
-            stdout=log_f,           # stdout -> file
-            stderr=subprocess.STDOUT,  # stderr -> stdout -> file
-            preexec_fn=os.setpgrp
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setpgrp  # Create new process group
         )
-
         logging.info(f"Started RealSense camera node (PID: {process.pid})")
-        logging.info(f"RealSense log file: {log_path}")
-
-        time.sleep(3)
-        return process, log_path
-
+        time.sleep(3)  # Wait for camera to initialize
+        return process
     except Exception as e:
         logging.error(f"Failed to start RealSense camera: {e}")
-        return None, log_path
+        return None
 
