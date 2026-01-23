@@ -313,6 +313,7 @@ def main(args: argparse.Namespace):
     logging.info(f"Camera logs will be stored in: {camera_log_dir}")
 
     # Define camera configurations using serial numbers provided by the user
+    # ros 2로 launch가 된다면
     cam_configs = []
     cameras_config = config.get("cameras")
     for cam_id, spec in cameras_config.items():

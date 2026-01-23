@@ -535,6 +535,7 @@ def start_realsense_camera():
 
     # Now launch the RealSense camera via ros2 launch
     try:
+        # 현재 ros jazzy에는 realsense2_camera 패키지가 없음
         cmd = "bash -c 'source /opt/ros/humble/setup.bash && ros2 launch realsense2_camera rs_launch.py'"
         process = subprocess.Popen(
             cmd,
