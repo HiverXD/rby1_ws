@@ -40,7 +40,6 @@ class Gripper:
         self.port = port
         self.timeout = timeout
 
-        # Keep the same attributes other code may touch.
         # In remote mode we store normalized targets directly and return cached values.
         self.target_q: np.typing.NDArray = None  # normalized target cache
 
@@ -96,7 +95,8 @@ class Gripper:
         resp = self._udp_request({"cmd": "get_target", "ts": time.time()}, expect_reply=True)
         if not resp or resp.get("target", None) is None:
             raise RuntimeError("[Gripper] Failed to get remote target (no response or target is None)")
-        return np.asarray(resp.get("target", None), dtype=float).reshape(-1)
+        self.target_q = np.asarray(resp.get("target", None), dtype=float).reshape(-1)
+        return self.target_q
     
     def get_normalized_target(self):
         """
@@ -109,21 +109,17 @@ class Gripper:
         if not resp or not resp.get("ok", False):
             raise RuntimeError("[Gripper] Failed to fetch remote normalized target (no response or ok=false)")
         target = resp.get("target", None)
-        
         if target is None:
             raise RuntimeError("[Gripper] Remote normalized target missing in response")
-        arr = np.asarray(target, dtype=float).reshape(-1)
-        if arr.size != 2:
-            raise RuntimeError(f"[Gripper] Remote normalized target invalid shape: {arr.shape}")
-        self.target_q = arr.copy()
-        return self.target_q
+        normalized_target = np.asarray(target, dtype=float).reshape(-1)
+        return normalized_target
 
     def set_normalized_target(self, normalized_q):
-        self._udp_request({"cmd": "set_normalized_target", "normalized_q": normalized_q.tolist(), "ts": time.time()}, expect_reply=False)
-        if Gripper.GRIPPER_DIRECTION:
-            self.target_q = normalized_q * (self.max_q - self.min_q) + self.min_q
-        else:
-            self.target_q = (1 - normalized_q) * (self.max_q - self.min_q) + self.min_q
+        resp = self._udp_request({"cmd": "set_normalized_target", "normalized_q": normalized_q.tolist(), "ts": time.time()}, expect_reply=True)
+        if not resp or not resp.get("ok", False):
+            raise RuntimeError("[Gripper] Failed to set remote normalized target (no response or ok=false)")
+        self.target_q = np.asarray(resp.get("target", None), dtype=float).reshape(-1)
+        
 
     def get_state(self):
         resp = self._udp_request({"cmd": "get_state", "ts": time.time()}, expect_reply=True)
