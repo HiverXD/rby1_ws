@@ -365,7 +365,7 @@ def main(args: argparse.Namespace):
             exit(1)
         gripper.homing()
         gripper.start()
-        gripper.set_normalized_target(np.array([0.0, 0.0]))
+        gripper.set_normalized_target(np.array([1.0, 1.0]))
 
     pub_thread = threading.Thread(target=publish_gv, args=(socket,), daemon=True)
     pub_thread.start()
@@ -425,7 +425,7 @@ def main(args: argparse.Namespace):
                 right_controller = SystemContext.vr_state.controller_state["hands"]["right"]
                 if gripper is not None:
                     gripper_target = gripper.get_target()
-                    gripper_target[0] = right_controller["buttons"]["trigger"]
+                    gripper_target[0] = 1. -right_controller["buttons"]["trigger"]
                     gripper.set_normalized_target(gripper_target)
 
             if "left" in SystemContext.vr_state.controller_state["hands"]:
