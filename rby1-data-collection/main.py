@@ -250,7 +250,6 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 
                 print("demo saved\n")
                 # print("robot_pose shape: ", robot_pos.shape)
-                print('\n'*10)
                 print("robot_target_joints shape: ", robot_target_joints.shape)
                 # print("gripper_state shape: ", grip.shape if grip is not None else None)
                 # print("base_state shape: ", base_state.shape if base_state is not None else None)
@@ -337,13 +336,16 @@ def main(args: argparse.Namespace):
     rclpy.init()
 
     # start writing
-
-    output_path = get_next_h5_path(root_path)
-    h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
+    output_path = None
+    h5_writer = None
+    if args.data_collect:
+        output_path = get_next_h5_path(root_path)
+        h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
 
     def power_off_and_stop():
-        rec_data.set()  # stop signal for logging thread
-        h5_writer.stop()  # save h5 file and exit
+        if args.data_collect:
+            rec_data.set()  # stop signal for logging thread
+            h5_writer.stop()  # save h5 file and exit
         robot.power_off(".*")
         # Clean up camera processes
         # if camera_processes: # Check if the dictionary is not empty
@@ -377,9 +379,10 @@ def main(args: argparse.Namespace):
     pub_thread = threading.Thread(target=publish_gv, args=(socket,), daemon=True)
     pub_thread.start()
 
-    rec_data = start_demo_logger(gripper, h5_writer, robot, fps=Settings.rec_fps)
-
-    logging.info("data handler run started")
+    rec_data = None
+    if args.data_collect:
+        rec_data = start_demo_logger(gripper, h5_writer, robot, fps=Settings.rec_fps)
+        logging.info("data handler run started")
 
 
     # expose writer and stop-event so button handlers can stop and save
