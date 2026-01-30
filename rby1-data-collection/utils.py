@@ -4,7 +4,7 @@ import os
 import yaml
 import logging
 import rby1_sdk as rby
-from setup import SystemContext
+from typing import Union
 
 def rosimg_to_numpy(msg: Image) -> np.ndarray:
     """Convert sensor_msgs/Image → np.ndarray (HxWxC, uint8)."""
@@ -22,22 +22,31 @@ def get_next_h5_path(base_dir="/home/nvidia/rby1_ws/rby1-data-collection/data"):
     # Create new path
     return os.path.join(base_dir, f"demo_{next_index}.h5")
 
-def elbows_bending_check() -> bool:
+
+def elbows_bending_check(robot: rby.Robot_A) -> bool:
     """
     Checks if elbow angles exceed a threshold to determine if a movement should be skipped.
 
     This function encapsulates the entire logic:
-    1. Reads the current joint angles from SystemContext.
+    1. Reads the current joint angles from the robot state.
     2. Gets robot model details (DOFs).
     3. Reads the angle threshold from 'config.yaml'.
     4. Compares the current elbow angles against the threshold.
 
+    Args:
+        robot: The robot object from which to get the state.
+
     Returns:
         True if the movement should be skipped (angle exceeded), False otherwise.
     """
-    # DEPENDENCY: This function relies on the global SystemContext for robot model and state.
-    # Future improvements might involve passing these dependencies as arguments for better testability and explicit control.
-    joint_angles = SystemContext.vr_state.joint_positions
+    if robot is None:
+        return False
+        
+    robot_state = robot.get_state()
+    if robot_state is None:
+        return False
+
+    joint_angles = robot_state.position
     if joint_angles is None or joint_angles.size == 0:
         # If joint data is unavailable, assume no skip for now.
         # Depending on safety requirements, this might need to raise an error or return True to force a skip.
@@ -45,7 +54,7 @@ def elbows_bending_check() -> bool:
 
     try:
         # Get DOFs from robot model
-        model = SystemContext.robot_model
+        model = robot.model()
         head_dof = len(model.head_idx)
         torso_dof = len(model.torso_idx)
         right_arm_dof = len(model.right_arm_idx)
@@ -77,3 +86,4 @@ def elbows_bending_check() -> bool:
         logging.warning(f"An unexpected error occurred in check_elbows_for_skip: {e}")
 
     return False
+

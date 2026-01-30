@@ -132,23 +132,27 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             # Thread-safe snapshot of latest camera frames
             synced, set_seq = node.get_synced_set_copy()
 
-            if synced is None: # synced 자체가 None일 경우만 확인
-                continue
+            # if synced is None: # synced 자체가 None일 경우만 확인
+            #     continue
 
             # Check if all cameras defined in cam_ids are present in the synced set
-            if not all(cid in synced for cid in cam_ids):
-                logging.warning(f"Not all cameras ({cam_ids}) were present in the synced set. Skipping.")
-                continue
+            # if not all(cid in synced for cid in cam_ids):
+            #     logging.warning(f"Not all cameras ({cam_ids}) were present in the synced set. Skipping.")
+            #     continue
 
             # Use the first camera in cam_ids for primary tasks like PCD generation.
-            primary_cam_id = cam_ids[0]
-            primary_cam_data = synced[primary_cam_id]
-            
-            frame = primary_cam_data.color
-            depth = primary_cam_data.depth
-            frame_stamp = primary_cam_data.stamp
-            frame_seq = primary_cam_data.seq
-            frame_t = primary_cam_data.t
+            if synced is None:
+                frame = None
+                depth = None
+                frame_stamp = None
+            else:
+                primary_cam_id = cam_ids[0]
+                primary_cam_data = synced[primary_cam_id]
+                frame = primary_cam_data.color
+                depth = primary_cam_data.depth
+                frame_stamp = primary_cam_data.stamp
+                frame_seq = primary_cam_data.seq
+                frame_t = primary_cam_data.t
 
             # Robot joint positions - 현재 포지션 읽기
             robot_pos = None
@@ -162,7 +166,6 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             except Exception as e:
                 logging.warning(f"[demo_logger] Failed to read robot position: {e}")
             
-
             # 이전 스텝의 robot_target_joints를 현재 robot_pos로 업데이트
             h5_writer.update_previous_target(robot_pos)
             robot_target_joints = robot_pos
@@ -201,7 +204,7 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 left_arm_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["grip"] > 0.8          
                 left_grip_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["trigger"] > 0.8
 
-            data_collection_bool = (frame is not None) and (right_arm_pressed or left_arm_pressed or right_grip_pressed or left_grip_pressed)
+            data_collection_bool = args.data_collect and (right_arm_pressed or left_arm_pressed or right_grip_pressed or left_grip_pressed)
 
             if data_collection_bool:
                 # Generate PCD from RGB-D
@@ -247,7 +250,8 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 
                 print("demo saved\n")
                 # print("robot_pose shape: ", robot_pos.shape)
-                # print("robot_target_joints shape: ", robot_target_joints.shape)
+                print('\n'*10)
+                print("robot_target_joints shape: ", robot_target_joints.shape)
                 # print("gripper_state shape: ", grip.shape if grip is not None else None)
                 # print("base_state shape: ", base_state.shape if base_state is not None else None)
                 # print("head_rgb shape: ", headcam_sub.curr_frame.shape if headcam_sub.curr_frame is not None else None)
@@ -266,14 +270,15 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 }
 
                 # Iterate through all available cameras and add their data to the dictionary
-                for cam_id in cam_ids:
-                    cam_data = synced[cam_id]
-                    data_to_save[f"{cam_id}_rgb"] = cam_data.color
-                    data_to_save[f"{cam_id}_rgb_ts"] = cam_data.t
-                    data_to_save[f"{cam_id}_depth"] = cam_data.depth
-                    data_to_save[f"{cam_id}_depth_ts"] = cam_data.t
-                    logging.info(f"{cam_data} color frame is {cam_data.color}")
-                h5_writer.put(data_to_save)
+                if synced is not None:
+                    for cam_id in cam_ids:
+                        cam_data = synced[cam_id]
+                        data_to_save[f"{cam_id}_rgb"] = cam_data.color
+                        data_to_save[f"{cam_id}_rgb_ts"] = cam_data.t
+                        data_to_save[f"{cam_id}_depth"] = cam_data.depth
+                        data_to_save[f"{cam_id}_depth_ts"] = cam_data.t
+                        logging.info(f"{cam_data} color frame is {cam_data.color}")
+                    h5_writer.put(data_to_save)
 
             # pacing at ~30 FPS with drift correction
             next_t += period
@@ -301,6 +306,7 @@ def main(args: argparse.Namespace):
     logging.info(f"RB-Y1 gRPC Address   : {args.rby1}")
     logging.info(f"RB-Y1 Model          : {args.rby1_model}")
     logging.info(f"Use Head             : {'No' if args.no_head else 'Yes'}")
+    logging.info(f"Data Collection      : {args.data_collect}")
 
     # Start RealSense camera node
     # Get camera configuration from the config file (for serial numbers)
@@ -313,7 +319,6 @@ def main(args: argparse.Namespace):
     logging.info(f"Camera logs will be stored in: {camera_log_dir}")
 
     # Define camera configurations using serial numbers provided by the user
-    # ros 2로 launch가 된다면
     cam_configs = []
     cameras_config = config.get("cameras")
     for cam_id, spec in cameras_config.items():
@@ -332,9 +337,10 @@ def main(args: argparse.Namespace):
     rclpy.init()
 
     # start writing
+
     output_path = get_next_h5_path(root_path)
     h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
-    
+
     def power_off_and_stop():
         rec_data.set()  # stop signal for logging thread
         h5_writer.stop()  # save h5 file and exit
@@ -366,7 +372,7 @@ def main(args: argparse.Namespace):
             exit(1)
         gripper.homing()
         gripper.start()
-        gripper.set_normalized_target(np.array([0.0, 0.0]))
+        gripper.set_normalized_target(np.array([1.0, 1.0]))
 
     pub_thread = threading.Thread(target=publish_gv, args=(socket,), daemon=True)
     pub_thread.start()
@@ -426,7 +432,7 @@ def main(args: argparse.Namespace):
                 right_controller = SystemContext.vr_state.controller_state["hands"]["right"]
                 if gripper is not None:
                     gripper_target = gripper.get_target()
-                    gripper_target[0] = right_controller["buttons"]["trigger"]
+                    gripper_target[0] = 1. -right_controller["buttons"]["trigger"]
                     gripper.set_normalized_target(gripper_target)
 
             if "left" in SystemContext.vr_state.controller_state["hands"]:
@@ -730,6 +736,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--whole_body", action="store_true",
         help="Use a whole-body optimization formulation (single control for all joints)"
+    )
+    parser.add_argument(
+        "--data_collect", action="store_true",
+        help="Enable H5 Writer and saved demo (default: False)"
+    )
+    parser.add_argument(
+        "--no_data_collect", action="store_false", dest="data_collect",
+        help="Disable H5 Writer and saved demo (default: True)"
     )
 
     args = parser.parse_args()
