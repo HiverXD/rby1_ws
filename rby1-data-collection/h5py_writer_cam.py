@@ -7,6 +7,7 @@ import numpy as np
 import os
 from pathlib import Path
 import logging
+import yaml
 
 class H5Writer:
     def __init__(self, path: str, flush_every: int = 60, flush_secs: float = 1.0, save_pcd: bool = True):
@@ -95,7 +96,11 @@ class H5Writer:
         saved_sample_count = 0
 
         # camera datasets for all groups (head, right_wrist, left_wrist)
-        camera_groups = ['head', 'right']
+
+        with open('rby1-data-collection/config.yaml', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        cams = config.get("cameras", {})
+        camera_groups = list(cams.keys())
         d_cam_data = {}  # {'head': {'time': dataset, 'img': dataset, 'idx': 0}, ...}
         for cam in camera_groups:
             d_cam_data[cam] = {'time': None, 'img': None, 'idx': 0, 'depth_time': None, 'depth_img': None, 'depth_idx': 0}

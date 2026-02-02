@@ -52,3 +52,4 @@ class SystemContext:
     # H5 writer and recording stop-event stored here so other threads/handlers can access them
     h5_writer: Optional[H5Writer] = None
     rec_stop_event: Optional[threading.Event] = None
+    cleanup_functions: list = []  # Functions to call on cleanup
