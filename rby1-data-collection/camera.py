@@ -6,10 +6,12 @@ import time
 import pyrealsense2 as rs
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+from collections import deque
 
 
 @dataclass
 class RGBDFrame:
+    # 센서 timestamp(초 단위)로 저장
     t: float
     color: np.ndarray
     depth: np.ndarray
@@ -17,24 +19,46 @@ class RGBDFrame:
 
 
 class MultiRealsense:
-    def __init__(self, camera_serials: List[str], width=640, height=480, fps=30):
+    def __init__(
+        self,
+        camera_serials: List[str],
+        width=640,
+        height=480,
+        fps=30,
+        sync_tolerance_ms: float = 15.0,
+        buffer_size: int = 30,
+    ):
         self.serials = camera_serials
         self.width = width
         self.height = height
         self.fps = fps
-        self.pipelines = {}
-        self.aligns = {}
-        self.running = False
-        self.thread = None
 
-        self.frames: Dict[str, RGBDFrame] = {}
+        # 동기화 설정
+        self.sync_tolerance_ms = float(sync_tolerance_ms)
+        self.buffer_size = int(buffer_size)
+
+        self.pipelines: Dict[str, rs.pipeline] = {}
+        self.configs: Dict[str, rs.config] = {}
+        self.aligns: Dict[str, rs.align] = {}
+
+        self.running = False
+
+        # 카메라별 캡처 스레드 + 동기화 스레드
+        self.capture_threads: Dict[str, threading.Thread] = {}
+        self.sync_thread: Optional[threading.Thread] = None
+
+        # 카메라별 프레임 버퍼 (timestamp 순)
+        self.buffers: Dict[str, deque] = {}
         self.lock = threading.Lock()
+
+        # 최종 “동기화된” 프레임 세트
+        self.synced_frames: Dict[str, RGBDFrame] = {}
 
         # Discover and initialize cameras
         ctx = rs.context()
         devices = ctx.query_devices()
         available_serials = {dev.get_info(rs.camera_info.serial_number) for dev in devices}
-        
+
         for serial in self.serials:
             if serial in available_serials:
                 pipe = rs.pipeline(ctx)
@@ -42,8 +66,12 @@ class MultiRealsense:
                 config.enable_device(serial)
                 config.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
                 config.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
-                self.pipelines[serial] = (pipe, config)
+
+                self.pipelines[serial] = pipe
+                self.configs[serial] = config
                 self.aligns[serial] = rs.align(rs.stream.color)
+
+                self.buffers[serial] = deque(maxlen=self.buffer_size)
                 logging.info(f"Camera {serial} configured.")
             else:
                 logging.warning(f"Camera with serial {serial} not found.")
@@ -53,64 +81,148 @@ class MultiRealsense:
             logging.error("No cameras configured. Cannot start.")
             return
 
-        for serial, (pipe, config) in self.pipelines.items():
+        # Start pipelines
+        for serial in list(self.pipelines.keys()):
             try:
-                pipe.start(config)
+                self.pipelines[serial].start(self.configs[serial])
                 logging.info(f"Pipeline started for camera {serial}")
             except Exception as e:
                 logging.error(f"Failed to start pipeline for camera {serial}: {e}")
-                # clean up already started pipelines
                 self.stop()
                 return
-        
+
         self.running = True
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
 
-    def _run(self):
+        # Start per-camera capture threads
+        for serial in self.pipelines.keys():
+            th = threading.Thread(target=self._capture_loop, args=(serial,), daemon=True)
+            self.capture_threads[serial] = th
+            th.start()
+
+        # Start sync thread
+        self.sync_thread = threading.Thread(target=self._sync_loop, daemon=True)
+        self.sync_thread.start()
+
+    def _capture_loop(self, serial: str):
+        """
+        카메라 1대당 1스레드로 프레임을 지속 수집해 버퍼에 적재.
+        """
+        pipe = self.pipelines[serial]
+        align = self.aligns[serial]
+
         while self.running:
-            framesets = {}
-            for serial, (pipe, _) in self.pipelines.items():
-                try:
-                    frames = pipe.wait_for_frames(timeout_ms=1000)
-                    framesets[serial] = frames
-                except Exception as e:
-                    logging.warning(f"Did not get frame from {serial}: {e}")
-                    # If a camera fails, maybe we should remove it from the list for a while
-                    continue
-            
-            with self.lock:
-                self.frames.clear()
-                for serial, frameset in framesets.items():
-                    aligned_frames = self.aligns[serial].process(frameset)
-                    depth_frame = aligned_frames.get_depth_frame()
-                    color_frame = aligned_frames.get_color_frame()
+            try:
+                frameset = pipe.wait_for_frames(timeout_ms=1000)
+                aligned = align.process(frameset)
 
-                    if not depth_frame or not color_frame:
-                        continue
-                    
-                    depth_image = np.asanyarray(depth_frame.get_data())
-                    color_image = np.asanyarray(color_frame.get_data())
-                    
-                    self.frames[serial] = RGBDFrame(
-                        t=time.time(),
-                        color=color_image,
-                        depth=depth_image,
-                        serial=serial
-                    )
-            # Adjust sleep time to be more precise
-            time.sleep(max(0, 1.0/self.fps - 0.005))
+                depth_frame = aligned.get_depth_frame()
+                color_frame = aligned.get_color_frame()
+                if not depth_frame or not color_frame:
+                    continue
+
+                # ✅ 센서 timestamp 사용 (ms) -> seconds
+                # color 기준으로 timestamp 사용 (depth도 같은 frameset 기반이라 근접)
+                ts_ms = float(color_frame.get_timestamp())
+                ts_s = ts_ms / 1000.0
+
+                depth_image = np.asanyarray(depth_frame.get_data())
+                color_image = np.asanyarray(color_frame.get_data())
+
+                fr = RGBDFrame(
+                    t=ts_s,
+                    color=color_image,
+                    depth=depth_image,
+                    serial=serial
+                )
+
+                with self.lock:
+                    self.buffers[serial].append(fr)
+
+            except Exception as e:
+                logging.warning(f"[{serial}] capture failed: {e}")
+                continue
+
+    def _sync_loop(self):
+        """
+        모든 카메라 버퍼에서 timestamp가 가장 비슷한 프레임을 골라
+        하나의 “동기화된 프레임 세트”로 만든다.
+        """
+        tol_s = self.sync_tolerance_ms / 1000.0
+
+        # 기준 카메라(첫 번째)를 레퍼런스로 사용
+        ref_serial = self.serials[0] if self.serials else None
+        if ref_serial is None or ref_serial not in self.buffers:
+            logging.error("No reference camera available for sync.")
+            return
+
+        while self.running:
+            with self.lock:
+                # 레퍼런스 버퍼가 비어 있으면 기다림
+                if len(self.buffers[ref_serial]) == 0:
+                    pass
+                else:
+                    # 레퍼런스의 “가장 최신” 프레임을 기준시각으로 사용
+                    ref_frame = self.buffers[ref_serial][-1]
+                    t_ref = ref_frame.t
+
+                    candidate_set: Dict[str, RGBDFrame] = {ref_serial: ref_frame}
+                    ok = True
+
+                    # 다른 카메라에서 t_ref에 가장 가까운 프레임 찾기
+                    for serial, buf in self.buffers.items():
+                        if serial == ref_serial:
+                            continue
+                        if len(buf) == 0:
+                            ok = False
+                            break
+
+                        # buf 안에서 |t - t_ref| 최소인 프레임 선택
+                        best = min(buf, key=lambda f: abs(f.t - t_ref))
+                        if abs(best.t - t_ref) > tol_s:
+                            ok = False
+                            break
+                        candidate_set[serial] = best
+
+                    if ok:
+                        # ✅ 동기화 성공: synced_frames 갱신
+                        self.synced_frames = copy.deepcopy(candidate_set)
+
+                        # (선택) 너무 오래된 프레임 정리:
+                        # 기준시각보다 한참 과거 프레임들은 버퍼에서 제거해 지연/메모리 감소
+                        for serial, buf in self.buffers.items():
+                            # t_ref - 2*tol 보다 오래된 건 제거
+                            while len(buf) > 0 and buf[0].t < (t_ref - 2 * tol_s):
+                                buf.popleft()
+
+            # sync 루프 주기 (너무 빠르게 돌지 않게)
+            time.sleep(max(0, 1.0 / self.fps / 2))
 
     def get_frames(self) -> Dict[str, RGBDFrame]:
+        """
+        ✅ 동기화된 프레임 세트를 반환.
+        모든 시리얼이 존재하지 않을 수도 있으니(초기 구간/카메라 드랍) 호출부에서 체크 권장.
+        """
         with self.lock:
-            return copy.deepcopy(self.frames)
+            return copy.deepcopy(self.synced_frames)
 
     def stop(self):
         self.running = False
-        if self.thread:
-            self.thread.join()
-        
-        for serial, (pipe, _) in self.pipelines.items():
+
+        # Join threads
+        for th in self.capture_threads.values():
+            try:
+                th.join(timeout=1.0)
+            except Exception:
+                pass
+
+        if self.sync_thread:
+            try:
+                self.sync_thread.join(timeout=1.0)
+            except Exception:
+                pass
+
+        # Stop pipelines
+        for serial, pipe in self.pipelines.items():
             try:
                 pipe.stop()
                 logging.info(f"Pipeline stopped for camera {serial}")
