@@ -121,10 +121,10 @@ class H5Writer:
             depth_grp = f.create_group("head_depth")
 
             # right_cam_grp = f.create_group("right_wrist_rgb")
-            # left_cam_grp = f.create_group("left_wrist_rgb")
+            left_cam_grp = f.create_group("left_rgb")
 
             # right_depth_grp = f.create_group("right_wrist_depth")
-            # left_depth_grp = f.create_group("left_wrist_depth")
+            left_depth_grp = f.create_group("left_depth")
 
             # PCD group
             pcd_grp = f.create_group("pointclouds") if self.save_pcd else None

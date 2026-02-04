@@ -10,22 +10,23 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-
 def main(address, model, power, servo):
-    robot = initialize_robot(address, model, power, servo)
+    robot: rby.Robot_A = initialize_robot(address, model, power, servo)
 
-    model = robot.model()
+    model: rby.Model_A = robot.model()
     torso_dof = len(model.torso_idx)
     right_arm_dof = len(model.right_arm_idx)
     left_arm_dof = len(model.left_arm_idx)
     head_dof = len(model.head_idx)
+
+    elobw_bending = elbows_bending_check(robot)
 
     right_arm_midpoint1 = Settings.right_arm_midpoint1
     left_arm_midpoint1 = Settings.left_arm_midpoint1
     right_arm_midpoint2 = Settings.right_arm_midpoint2
     left_arm_midpoint2 = Settings.left_arm_midpoint2
 
-    if (right_arm_midpoint2 is not None) and (left_arm_midpoint2 is not None):
+    if elobw_bending and (right_arm_midpoint2 is not None) and (left_arm_midpoint2 is not None):
         movej(
             robot,
             np.zeros(torso_dof),
@@ -35,7 +36,7 @@ def main(address, model, power, servo):
             minimum_time=10,
         )
 
-    if (right_arm_midpoint1 is not None) and (left_arm_midpoint1 is not None):
+    if elobw_bending and (right_arm_midpoint1 is not None) and (left_arm_midpoint1 is not None):
         movej(
             robot,
             np.zeros(torso_dof),
@@ -44,7 +45,7 @@ def main(address, model, power, servo):
             np.zeros(head_dof),
             minimum_time=10,
         )
-    
+
     movej(
         robot,
         np.zeros(torso_dof),

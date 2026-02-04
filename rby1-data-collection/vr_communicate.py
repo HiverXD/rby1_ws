@@ -116,7 +116,7 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
             robot.cancel_control()
         if robot.wait_for_control_ready(1000):
 
-            skip_movej_due_to_elbow = elbows_bending_check()
+            skip_movej_due_to_elbow = elbows_bending_check(robot)
 
             # Only execute movej if 'started' is False and we didn't skip due to elbow angle
             if not started and not skip_movej_due_to_elbow and \

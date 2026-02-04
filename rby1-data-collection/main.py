@@ -8,13 +8,9 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R, Slerp
 from remote_gripper import Gripper
 import pickle
-from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 
 # demo writer 
-from h5py_writer import H5Writer
-
-# ROS2 Camera subscriber
-import rclpy
+from h5py_writer_cam import H5Writer
 
 import numpy as np
 import time
@@ -25,7 +21,7 @@ from utils import *
 import threading
 from helper import * 
 
-from camera import HeadCamSub, MultiCamRGBDSync, start_realsense_camera, start_realsense_cameras, stop_realsense_cameras, RealSenseInstance
+from camera import MultiRealsense
 from setup import Settings, SystemContext
 from robot_communicate import robot_state_callback, connect_rby1
 from vr_communicate import setup_meta_quest_udp_communication, handle_vr_button_event
@@ -98,31 +94,20 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
     # Import PCD utilities
     from pcd_utils import rgbd_to_pointcloud, REALSENSE_D435_INTRINSICS, REALSENSE_D435_INTRINSICS_848x480
 
+    config = get_config()
     # Get camera configuration from the config file
-    cameras_to_sync = config.get('cameras', {})
-    if not cameras_to_sync:
+    cameras_config = config.get('cameras', {})
+    if not cameras_config:
         logging.warning("No camera configuration found in config.yaml. Camera streams will not be processed.")
     
-    # Get the list of camera names from config, which will be used to access data
-    cam_ids = config.get('cameras', []).keys()
-    cam_node_num = config.get('cam_node_num', 6)
+    camera_serials = [spec['serial'] for spec in cameras_config.values()]
+    img_size = config.get('img_size', {'width': 640, 'height': 480})
 
-    node = MultiCamRGBDSync(
-        cameras=cameras_to_sync,
-        rgbd_slop=0.05,
-        rgbd_queue=20,
-        multicam_tol=0.06,
-        max_buf=50,
-    )
-    executor = MultiThreadedExecutor(num_threads= cam_node_num * len(cam_ids))
-    executor.add_node(node)
+    realsense = MultiRealsense(camera_serials=camera_serials, width=img_size['width'], height=img_size['height'])
+    realsense.start()
 
-    spin_thread = threading.Thread(
-        target=executor.spin,
-        name="ros2_spin",
-        daemon=True
-    )
-    spin_thread.start()
+    cam_ids = list(cameras_config.keys())
+
 
     def _loop():
         logging.info("loop started")
@@ -130,29 +115,18 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
 
         while not stop_event.is_set():
             # Thread-safe snapshot of latest camera frames
-            synced, set_seq = node.get_synced_set_copy()
+            frames = realsense.get_frames()
 
-            # if synced is None: # synced 자체가 None일 경우만 확인
-            #     continue
-
-            # Check if all cameras defined in cam_ids are present in the synced set
-            # if not all(cid in synced for cid in cam_ids):
-            #     logging.warning(f"Not all cameras ({cam_ids}) were present in the synced set. Skipping.")
-            #     continue
+            if not frames:
+                time.sleep(period)
+                continue
 
             # Use the first camera in cam_ids for primary tasks like PCD generation.
-            if synced is None:
-                frame = None
-                depth = None
-                frame_stamp = None
-            else:
-                primary_cam_id = cam_ids[0]
-                primary_cam_data = synced[primary_cam_id]
-                frame = primary_cam_data.color
-                depth = primary_cam_data.depth
-                frame_stamp = primary_cam_data.stamp
-                frame_seq = primary_cam_data.seq
-                frame_t = primary_cam_data.t
+            primary_cam_id = next(iter(frames.keys()))
+            primary_cam_data = frames[primary_cam_id]
+            frame = primary_cam_data.color
+            depth = primary_cam_data.depth
+            frame_stamp = primary_cam_data.t
 
             # Robot joint positions - 현재 포지션 읽기
             robot_pos = None
@@ -196,17 +170,18 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             left_grip_pressed = False
 
             # 왼손 오른손 작동 그립 넷 중 하나 눌렀으면 데이터 수집
-            if "hands" in SystemContext.vr_state.controller_state and "right" in SystemContext.vr_state.controller_state["hands"]:    
+            if "hands" in SystemContext.vr_state.controller_state and "right" in SystemContext.vr_state.controller_state["hands"]:
                 right_arm_pressed = SystemContext.vr_state.controller_state["hands"]["right"]["buttons"]["grip"] > 0.8
                 right_grip_pressed = SystemContext.vr_state.controller_state["hands"]["right"]["buttons"]["trigger"] > 0.8
 
-            if "hands" in SystemContext.vr_state.controller_state and "left" in SystemContext.vr_state.controller_state["hands"]: 
+            if "hands" in SystemContext.vr_state.controller_state and "left" in SystemContext.vr_state.controller_state["hands"]:
                 left_arm_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["grip"] > 0.8          
                 left_grip_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["trigger"] > 0.8
 
             data_collection_bool = args.data_collect and (right_arm_pressed or left_arm_pressed or right_grip_pressed or left_grip_pressed)
 
             if data_collection_bool:
+                logging.info("data_collection_bool activated")
                 # Generate PCD from RGB-D
                 pcd_points = None
                 pcd_colors = None
@@ -250,8 +225,7 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 
                 print("demo saved\n")
                 # print("robot_pose shape: ", robot_pos.shape)
-                print('\n'*10)
-                print("robot_target_joints shape: ", robot_target_joints.shape)
+                # print("robot_target_joints shape: ", robot_target_joints.shape)
                 # print("gripper_state shape: ", grip.shape if grip is not None else None)
                 # print("base_state shape: ", base_state.shape if base_state is not None else None)
                 # print("head_rgb shape: ", headcam_sub.curr_frame.shape if headcam_sub.curr_frame is not None else None)
@@ -270,15 +244,15 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 }
 
                 # Iterate through all available cameras and add their data to the dictionary
-                if synced is not None:
-                    for cam_id in cam_ids:
-                        cam_data = synced[cam_id]
-                        data_to_save[f"{cam_id}_rgb"] = cam_data.color
-                        data_to_save[f"{cam_id}_rgb_ts"] = cam_data.t
-                        data_to_save[f"{cam_id}_depth"] = cam_data.depth
-                        data_to_save[f"{cam_id}_depth_ts"] = cam_data.t
-                        logging.info(f"{cam_data} color frame is {cam_data.color}")
-                    h5_writer.put(data_to_save)
+                for cam_id, cam_name in zip(frames.keys(), cam_ids):
+                    logging.info(f"{cam_name} image is saving")
+                    cam_data = frames[cam_id]
+                    data_to_save[f"{cam_name}_rgb"] = cam_data.color
+                    data_to_save[f"{cam_name}_rgb_ts"] = cam_data.t
+                    data_to_save[f"{cam_name}_depth"] = cam_data.depth
+                    data_to_save[f"{cam_name}_depth_ts"] = cam_data.t
+                    # logging.info(f"{cam_data} color frame is {cam_data.color}")
+                h5_writer.put(data_to_save)
 
             # pacing at ~30 FPS with drift correction
             next_t += period
@@ -289,12 +263,19 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 # we overran; reset schedule to now to avoid accumulating lag
                 next_t = time.perf_counter()
 
-            # TODO: if stop record is triggered stop 
-            # 
-
     t = threading.Thread(target=_loop, name="demo_logger", daemon=True)
     t.start()
     logging.info(f"Started demo logger at {fps} FPS")
+
+    # This is a bit of a hack. The _loop will run until the main thread exits.
+    # We return a stop_event that can be used to signal the loop to stop,
+    # and we also add a cleanup function to stop the realsense cameras.
+    def cleanup():
+        stop_event.set()
+        realsense.stop()
+
+    SystemContext.cleanup_functions.append(cleanup)
+    
     return stop_event
 
 def main(args: argparse.Namespace):
@@ -308,47 +289,25 @@ def main(args: argparse.Namespace):
     logging.info(f"Use Head             : {'No' if args.no_head else 'Yes'}")
     logging.info(f"Data Collection      : {args.data_collect}")
 
-    # Start RealSense camera node
-    # Get camera configuration from the config file (for serial numbers)
-    config = get_config() # Moved up to get config earlier
-
-    # Define a directory for camera logs inside the project's demo root
+    config = get_config() 
     root_path = os.path.join(config['demo_root'], config['task_name'])
     os.makedirs(root_path, exist_ok=True)
-    camera_log_dir = os.path.join(root_path, "camera_logs")
-    logging.info(f"Camera logs will be stored in: {camera_log_dir}")
-
-    # Define camera configurations using serial numbers provided by the user
-    cam_configs = []
-    cameras_config = config.get("cameras")
-    for cam_id, spec in cameras_config.items():
-        cam_configs.append(RealSenseInstance(
-            serial_no=spec["serial"],
-            namespace=spec["namespace"]
-        ))
-
-    # Correctly call start_realsense_cameras and pass the log directory
-    # camera_processes = start_realsense_cameras(
-    #     cam_configs,
-    #     log_dir=camera_log_dir,
-    #     extra_launch_args="enable_sync:=true align_depth.enable:=true"
-    # )
-
-    rclpy.init()
 
     # start writing
-
-    output_path = get_next_h5_path(root_path)
-    h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
+    output_path = None
+    h5_writer = None
+    if args.data_collect:
+        output_path = get_next_h5_path(root_path)
+        h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
 
     def power_off_and_stop():
-        rec_data.set()  # stop signal for logging thread
-        h5_writer.stop()  # save h5 file and exit
+        if args.data_collect:
+            rec_data.set()  # stop signal for logging thread
+            h5_writer.stop()  # save h5 file and exit
         robot.power_off(".*")
-        # Clean up camera processes
-        # if camera_processes: # Check if the dictionary is not empty
-        #     logging.info("Shutting down RealSense camera nodes...")
-        #     stop_realsense_cameras(camera_processes)
+        for cleanup_func in SystemContext.cleanup_functions:
+            cleanup_func()
+
 
     socket = open_zmq_pub_socket(args.server)
     robot = connect_rby1(args.rby1, args.rby1_model, args.no_head)
@@ -377,14 +336,17 @@ def main(args: argparse.Namespace):
     pub_thread = threading.Thread(target=publish_gv, args=(socket,), daemon=True)
     pub_thread.start()
 
-    rec_data = start_demo_logger(gripper, h5_writer, robot, fps=Settings.rec_fps)
-
-    logging.info("data handler run started")
+    rec_data = None
+    if args.data_collect:
+        rec_data = start_demo_logger(gripper, h5_writer, robot, fps=Settings.rec_fps)
+        logging.info("data handler run started")
 
 
     # expose writer and stop-event so button handlers can stop and save
     SystemContext.h5_writer = h5_writer
     SystemContext.rec_stop_event = rec_data 
+    SystemContext.cleanup_functions = []
+
 
     logging.info(f"output path is {output_path}\n h5 is {h5_writer}\n")
 
@@ -442,7 +404,7 @@ def main(args: argparse.Namespace):
                     gripper_target[1] = 1. - left_controller["buttons"]["trigger"]
                     gripper.set_normalized_target(gripper_target)
 
-        logging.info(f"{SystemContext.vr_state.center_of_mass = }")
+        # logging.info(f"{SystemContext.vr_state.center_of_mass = }")
 
         dyn_state.set_q(SystemContext.vr_state.joint_positions.copy())
         dyn_robot.compute_forward_kinematics(dyn_state)
