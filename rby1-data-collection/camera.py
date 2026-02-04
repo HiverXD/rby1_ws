@@ -139,7 +139,7 @@ class MultiRealsense:
                     self.buffers[serial].append(fr)
 
             except Exception as e:
-                logging.warning(f"[{serial}] capture failed: {e}")
+                # logging.warning(f"[{serial}] capture failed: {e}")
                 continue
 
     def _sync_loop(self):

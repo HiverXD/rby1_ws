@@ -30,11 +30,11 @@ cameras:
     serial: "922612070040"
     color: "/camera/camera/color/image_raw"
     depth: "/camera/camera/depth/image_rect_raw"
-  # right:
-  #   namespace: "camera"
-  #   serial: "838212074317"
-  #   color: "/camera/camera/color/image_raw"
-  #   depth: "/camera/camera/depth/image_rect_raw"
+  right:
+    namespace: "camera3"
+    serial: "838212074317"
+    color: "/camera3/camera/color/image_raw"
+    depth: "/camera3/camera/depth/image_rect_raw"
   left:
     namespace: "camera2"
     serial: "838212070714"
@@ -43,6 +43,9 @@ cameras:
 
 cam_node_num: 3
 
+img_size:
+  width: 640
+  height: 480
 # camera model & serial number
 # command: rs-enumerate-devices -s
 # Head RealSense  D435          922612070040

@@ -101,8 +101,9 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
         logging.warning("No camera configuration found in config.yaml. Camera streams will not be processed.")
     
     camera_serials = [spec['serial'] for spec in cameras_config.values()]
-    
-    realsense = MultiRealsense(camera_serials=camera_serials)
+    img_size = config.get('img_size', {'width': 640, 'height': 480})
+
+    realsense = MultiRealsense(camera_serials=camera_serials, width=img_size['width'], height=img_size['height'])
     realsense.start()
 
     cam_ids = list(cameras_config.keys())
@@ -180,6 +181,7 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             data_collection_bool = args.data_collect and (right_arm_pressed or left_arm_pressed or right_grip_pressed or left_grip_pressed)
 
             if data_collection_bool:
+                logging.info("data_collection_bool activated")
                 # Generate PCD from RGB-D
                 pcd_points = None
                 pcd_colors = None
@@ -402,7 +404,7 @@ def main(args: argparse.Namespace):
                     gripper_target[1] = 1. - left_controller["buttons"]["trigger"]
                     gripper.set_normalized_target(gripper_target)
 
-        logging.info(f"{SystemContext.vr_state.center_of_mass = }")
+        # logging.info(f"{SystemContext.vr_state.center_of_mass = }")
 
         dyn_state.set_q(SystemContext.vr_state.joint_positions.copy())
         dyn_robot.compute_forward_kinematics(dyn_state)
