@@ -8,3 +8,6 @@ __pycache__/*
 *.log
 *.pcd
 *.pyc
+*.dae
+*.glb
+*.gltf
