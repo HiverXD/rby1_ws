@@ -25,13 +25,14 @@ def main():
     
     print(f"\nAttempting to capture one frame from each device into '{output_dir}'...")
 
-    # Iterate over all connected devices
+    # Iterate over all connected devices (process sequentially to avoid USB bandwidth conflicts)
     for device in devices:
         serial_number = device.get_info(rs.camera_info.serial_number)
         print(f"\nProcessing device: {serial_number}")
 
         pipeline = rs.pipeline()
         config = rs.config()
+        pipeline_started = False
 
         try:
             # Enable the specific device
@@ -40,6 +41,7 @@ def main():
             # Check for RGB sensor on the device
             found_rgb = False
             for s in device.sensors:
+                print(f"  Available sensor: {s.get_info(rs.camera_info.name)}")
                 if s.get_info(rs.camera_info.name) == 'RGB Camera':
                     found_rgb = True
                     break
@@ -49,16 +51,21 @@ def main():
                 continue
 
             # Configure and start the pipeline for the current device
-            # Request RGB format instead of BGR
             config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
             config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-            pipeline.start(config)
+            
+            try:
+                pipeline.start(config)
+                pipeline_started = True
+            except Exception as e:
+                print(f"  - Failed to start pipeline for device {serial_number}: {e}. Skipping.")
+                continue
 
             # Create an align object
             align_to = rs.stream.color
             align = rs.align(align_to)
 
-            # Wait for a coherent pair of frames
+            # Wait for a coherent pair of frames (increased timeout to 10 seconds)
             try:
                 frames = pipeline.wait_for_frames(timeout_ms=5000) # 5-second timeout
             except RuntimeError as e:
@@ -79,9 +86,6 @@ def main():
             depth_image = np.asanyarray(depth_frame.get_data())
             color_image = np.asanyarray(color_frame.get_data())
 
-            # ** Explicitly convert RGB to BGR for OpenCV **
-            # color_image = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
-
             # Apply colormap on depth image
             depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
 
@@ -89,7 +93,7 @@ def main():
             color_filename = os.path.join(output_dir, f"color_frame_{serial_number}.png")
             depth_filename = os.path.join(output_dir, f"depth_frame_{serial_number}.png")
 
-            # Save the images (using the BGR converted image)
+            # Save the images
             cv2.imwrite(color_filename, color_image)
             cv2.imwrite(depth_filename, depth_colormap)
             print(f"  - Successfully saved images to {color_filename} and {depth_filename}")
@@ -97,9 +101,13 @@ def main():
         except Exception as e:
             print(f"  - An unexpected error occurred with device {serial_number}: {e}")
         finally:
-            # Stop the pipeline for the current device to release it
-            print(f"  - Stopping pipeline for device {serial_number}.")
-            pipeline.stop()
+            # Stop the pipeline only if it was started
+            if pipeline_started:
+                try:
+                    print(f"  - Stopping pipeline for device {serial_number}.")
+                    pipeline.stop()
+                except Exception as e:
+                    print(f"  - Error stopping pipeline: {e}")
 
     print("\nAll devices processed.")
 

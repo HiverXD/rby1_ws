@@ -179,9 +179,10 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 left_grip_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["trigger"] > 0.8
 
             data_collection_bool = args.data_collect and (right_arm_pressed or left_arm_pressed or right_grip_pressed or left_grip_pressed)
+            
+            # logging.info(f"data_collection_bool activated: {data_collection_bool}")
 
             if data_collection_bool:
-                logging.info("data_collection_bool activated")
                 # Generate PCD from RGB-D
                 pcd_points = None
                 pcd_colors = None
@@ -337,6 +338,10 @@ def main(args: argparse.Namespace):
     pub_thread.start()
 
     rec_data = None
+
+    # Initialize cleanup functions container before starting subsystems
+    SystemContext.cleanup_functions = []
+
     if args.data_collect:
         rec_data = start_demo_logger(gripper, h5_writer, robot, fps=Settings.rec_fps)
         logging.info("data handler run started")
@@ -344,8 +349,7 @@ def main(args: argparse.Namespace):
 
     # expose writer and stop-event so button handlers can stop and save
     SystemContext.h5_writer = h5_writer
-    SystemContext.rec_stop_event = rec_data 
-    SystemContext.cleanup_functions = []
+    SystemContext.rec_stop_event = rec_data
 
 
     logging.info(f"output path is {output_path}\n h5 is {h5_writer}\n")

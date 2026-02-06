@@ -25,7 +25,7 @@ class MultiRealsense:
         width=640,
         height=480,
         fps=30,
-        sync_tolerance_ms: float = 15.0,
+        sync_tolerance_ms: float = 30.0,
         buffer_size: int = 30,
     ):
         self.serials = camera_serials
@@ -81,20 +81,36 @@ class MultiRealsense:
             logging.error("No cameras configured. Cannot start.")
             return
 
-        # Start pipelines
+        # Track which pipelines started successfully
+        started_serials = []
+
+        # Start pipelines with retry logic
         for serial in list(self.pipelines.keys()):
-            try:
-                self.pipelines[serial].start(self.configs[serial])
-                logging.info(f"Pipeline started for camera {serial}")
-            except Exception as e:
-                logging.error(f"Failed to start pipeline for camera {serial}: {e}")
-                self.stop()
-                return
+            max_retries = 3
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                try:
+                    self.pipelines[serial].start(self.configs[serial])
+                    logging.info(f"Pipeline started for camera {serial}")
+                    started_serials.append(serial)
+                    break
+                except Exception as e:
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        logging.warning(f"Failed to start pipeline for camera {serial} (attempt {retry_count}/{max_retries}): {e}")
+                        time.sleep(2)  # Wait before retry
+                    else:
+                        logging.error(f"Failed to start pipeline for camera {serial} after {max_retries} attempts: {e}")
+        
+        if not started_serials:
+            logging.error("No cameras could be started.")
+            return
 
         self.running = True
 
-        # Start per-camera capture threads
-        for serial in self.pipelines.keys():
+        # Start per-camera capture threads (only for successfully started cameras)
+        for serial in started_serials:
             th = threading.Thread(target=self._capture_loop, args=(serial,), daemon=True)
             self.capture_threads[serial] = th
             th.start()
@@ -112,13 +128,16 @@ class MultiRealsense:
 
         while self.running:
             try:
-                frameset = pipe.wait_for_frames(timeout_ms=1000)
+                frameset = pipe.wait_for_frames(timeout_ms=5000)  # Increased timeout
                 aligned = align.process(frameset)
 
                 depth_frame = aligned.get_depth_frame()
                 color_frame = aligned.get_color_frame()
                 if not depth_frame or not color_frame:
+                    logging.warning(f"[{serial}] capture failed: depth or color frame is None")
                     continue
+
+                # logging.info(f"[{serial}] capture successful.")
 
                 # ✅ 센서 timestamp 사용 (ms) -> seconds
                 # color 기준으로 timestamp 사용 (depth도 같은 frameset 기반이라 근접)
@@ -139,7 +158,7 @@ class MultiRealsense:
                     self.buffers[serial].append(fr)
 
             except Exception as e:
-                # logging.warning(f"[{serial}] capture failed: {e}")
+                logging.warning(f"[{serial}] capture failed: {e}")
                 continue
 
     def _sync_loop(self):

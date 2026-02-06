@@ -1,13 +1,13 @@
 # demo collection
-task_name: "PuttingCupintotheDish" # 데모 저장 디렉토리를 지정하기 위한 config
+task_name: "Sample" # "PuttingCupintotheDish" # 데모 저장 디렉토리를 지정하기 위한 config
 # demo_root: '/media/nvidia/T7/Demo/' # ssh로 user pc에서 했을 때
-demo_root: 'rby1-data-collection/Demo/'
+demo_root: '../rby1-data-collection/' # 'rby1-data-collection/Demo/'
 
 # dataset config
 FPS: 10
 
 # dataset conversion
-conversion_task_name: "PuttingCupintotheDish" # 어떤 task의 데모를 변환할 것인지 지정하기 위한 config
+conversion_task_name: "Sample" # "PuttingCupintotheDish" # 어떤 task의 데모를 변환할 것인지 지정하기 위한 config
 
 user_name : "edipark" # Hugging Face 데이터 push를 위한 user name
 
