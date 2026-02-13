@@ -100,6 +100,8 @@ class H5Writer:
         with open('rby1-data-collection/config.yaml', encoding='utf-8') as f:
             config = yaml.safe_load(f)
         cams = config.get("cameras", {})
+        if cams is None:
+            cams = {}
         camera_groups = list(cams.keys())
         d_cam_data = {}  # {'head': {'time': dataset, 'img': dataset, 'idx': 0}, ...}
         for cam in camera_groups:
@@ -137,8 +139,12 @@ class H5Writer:
 
                 # ----- Lazy dataset creation for kinematics/gripper -----
                 if (d_time is None) and batch:
-                    first = next((s for s in batch if s.get("robot_position") is not None), None)
-                    rp_dim = len(first["robot_position"]) if first else 0
+                    try:
+                        first = next((s for s in batch if s.get("robot_position") is not None), None)
+                        rp_dim = len(first["robot_position"]) if first else 0
+                    except Exception as e:
+                        logging.warning(f"[h5_writer] Failed to get robot_position dimension: {e}")
+                        rp_dim = 0
 
                     # first_rtc = next((s for s in batch if s.get("robot_target_cartesian") is not None), None)
                     # rtc_dim = len(first_rtc["robot_target_cartesian"]) if first_rtc else 0
@@ -188,7 +194,8 @@ class H5Writer:
                             try:
                                 img = np.asarray(cam_first[key])
                                 if img.ndim != 3 or img.shape[2] not in (3, 4):
-                                    raise ValueError(f"{key} must be HxWx3(4) uint8, got {img.shape}")
+                                    logging.warning(f"{key} must be HxWx3(4) uint8, got {img.shape}")
+                                    continue
                                 H, W, C = img.shape
                                 logging.info(f"[h5_writer] Creating {key} dataset: shape=({H}, {W}, {C})")
                                 # timestamps for camera frames
@@ -201,8 +208,10 @@ class H5Writer:
                                     "image", shape=(0, H, W, C), maxshape=(None, H, W, C),
                                     dtype="u1", chunks=(1, H, W, C), compression="gzip"
                                 )
+                                logging.info(f"[h5_writer] Successfully created {key} dataset")
                             except Exception as e:
-                                logging.error(f"[h5_writer] Failed to create {key} dataset: {e}")
+                                logging.warning(f"[h5_writer] Failed to create {key} dataset: {e}")
+                                d_cam_data[cam]['img'] = None
                                 continue
 
                 # ----- Lazy dataset creation for all depth groups -----
@@ -214,7 +223,8 @@ class H5Writer:
                             try:
                                 depth = np.asarray(depth_first[key])
                                 if depth.ndim != 2:
-                                    raise ValueError(f"{key} must be HxW uint16, got {depth.shape}")
+                                    logging.warning(f"{key} must be HxW uint16, got {depth.shape}")
+                                    continue
                                 H_d, W_d = depth.shape
                                 logging.info(f"[h5_writer] Creating {key} dataset: shape=({H_d}, {W_d})")
                                 # timestamps for depth frames
@@ -227,8 +237,10 @@ class H5Writer:
                                     "image", shape=(0, H_d, W_d), maxshape=(None, H_d, W_d),
                                     dtype="u2", chunks=(1, H_d, W_d), compression="gzip"
                                 )
+                                logging.info(f"[h5_writer] Successfully created {key} dataset")
                             except Exception as e:
-                                logging.error(f"[h5_writer] Failed to create {key} dataset: {e}")
+                                logging.warning(f"[h5_writer] Failed to create {key} dataset: {e}")
+                                d_cam_data[cam]['depth_img'] = None
                                 continue
 
                 # ----- Append kinematics / gripper -----
@@ -356,15 +368,18 @@ class H5Writer:
                                     continue
 
                         if cam_times:
-                            n_new_cam = len(cam_times)
-                            cam_idx = d_cam_data[cam]['idx']
-                            d_cam_data[cam]['time'].resize((cam_idx + n_new_cam,))
-                            d_cam_data[cam]['time'][cam_idx: cam_idx + n_new_cam] = np.asarray(cam_times, dtype=np.float64)
+                            try:
+                                n_new_cam = len(cam_times)
+                                cam_idx = d_cam_data[cam]['idx']
+                                d_cam_data[cam]['time'].resize((cam_idx + n_new_cam,))
+                                d_cam_data[cam]['time'][cam_idx: cam_idx + n_new_cam] = np.asarray(cam_times, dtype=np.float64)
 
-                            d_cam_data[cam]['img'].resize((cam_idx + n_new_cam, *d_cam_data[cam]['img'].shape[1:]))
-                            d_cam_data[cam]['img'][cam_idx: cam_idx + n_new_cam, ...] = np.stack(cam_imgs, axis=0)
+                                d_cam_data[cam]['img'].resize((cam_idx + n_new_cam, *d_cam_data[cam]['img'].shape[1:]))
+                                d_cam_data[cam]['img'][cam_idx: cam_idx + n_new_cam, ...] = np.stack(cam_imgs, axis=0)
 
-                            d_cam_data[cam]['idx'] += n_new_cam
+                                d_cam_data[cam]['idx'] += n_new_cam
+                            except Exception as e:
+                                logging.warning(f"[h5_writer] Failed to append {key_rgb} frames: {e}")
 
                 # ----- Append depth frames (independent index) -----
                 for cam in camera_groups:
@@ -390,15 +405,18 @@ class H5Writer:
                                     continue
 
                         if depth_times:
-                            n_new_depth = len(depth_times)
-                            depth_idx = d_cam_data[cam]['depth_idx']
-                            d_cam_data[cam]['depth_time'].resize((depth_idx + n_new_depth,))
-                            d_cam_data[cam]['depth_time'][depth_idx: depth_idx + n_new_depth] = np.asarray(depth_times, dtype=np.float64)
+                            try:
+                                n_new_depth = len(depth_times)
+                                depth_idx = d_cam_data[cam]['depth_idx']
+                                d_cam_data[cam]['depth_time'].resize((depth_idx + n_new_depth,))
+                                d_cam_data[cam]['depth_time'][depth_idx: depth_idx + n_new_depth] = np.asarray(depth_times, dtype=np.float64)
 
-                            d_cam_data[cam]['depth_img'].resize((depth_idx + n_new_depth, *d_cam_data[cam]['depth_img'].shape[1:]))
-                            d_cam_data[cam]['depth_img'][depth_idx: depth_idx + n_new_depth, ...] = np.stack(depth_imgs, axis=0)
+                                d_cam_data[cam]['depth_img'].resize((depth_idx + n_new_depth, *d_cam_data[cam]['depth_img'].shape[1:]))
+                                d_cam_data[cam]['depth_img'][depth_idx: depth_idx + n_new_depth, ...] = np.stack(depth_imgs, axis=0)
 
-                            d_cam_data[cam]['depth_idx'] += n_new_depth
+                                d_cam_data[cam]['depth_idx'] += n_new_depth
+                            except Exception as e:
+                                logging.warning(f"[h5_writer] Failed to append {key_depth} frames: {e}")
                 
                 # ----- Append PCD data (from pre-computed point clouds) -----
                 if batch and self.save_pcd and pcd_grp is not None:

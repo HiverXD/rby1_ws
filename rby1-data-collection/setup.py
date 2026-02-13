@@ -27,9 +27,9 @@ class Settings:
     MAX_POINT: int = None
 
     # Initial poses in degrees
-    torso_init_pose: tuple = (0.0, 20.0, -40.0, 20.0, 0.0, 0.0)
-    right_arm_init_pose: tuple = (0.0, -15.0, 0.0, -120.0, 0.0, 70.0, 0.0)
-    left_arm_init_pose: tuple = (0.0, 15.0, 0.0, -120.0, 0.0, 70.0, 0.0)
+    torso_init_pose: tuple = (0.0, 20.0, -40.0, 35.0, 0.0, 0.0)  #0 20 -40 20 0 0 -> 0 20 -40 40 0 0
+    right_arm_init_pose: tuple = (-24.0, -60.0, 10.0, -120.0, -60.0, 85.0, 0.0)  #0 -15 0 -120 0 70 0 -> -24 -20 10 -120 -20 85 0
+    left_arm_init_pose: tuple = (-24.0, 60.0, -10.0, -120.0, 60.0, 85.0, 0.0)    #0 15 0 -120 0 70 0 -> -24 20 -10 -120 20 85 0
     torso_head_init_pose: tuple = (0.0, 0.0)
     bimanual_head_init_pose: tuple = (0.0, 40.0)
     
@@ -53,3 +53,10 @@ class SystemContext:
     h5_writer: Optional[H5Writer] = None
     rec_stop_event: Optional[threading.Event] = None
     cleanup_functions: list = []  # Functions to call on cleanup
+    
+    # Camera object for stopping frames when recording stops
+    realsense: Optional[object] = None
+    
+    # Demo recording state management
+    demo_recording_status: str = "idle"  # "idle", "recording", "stopping"
+    start_new_recording_requested: bool = False  # Flag to request starting a new recording in main loop

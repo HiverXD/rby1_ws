@@ -41,6 +41,8 @@ class MultiRealsense:
         self.configs: Dict[str, rs.config] = {}
         self.aligns: Dict[str, rs.align] = {}
 
+        self.filters: Dict[str, Dict] = {} #key: Serial Number
+
         self.running = False
 
         # 카메라별 캡처 스레드 + 동기화 스레드
@@ -75,6 +77,31 @@ class MultiRealsense:
                 logging.info(f"Camera {serial} configured.")
             else:
                 logging.warning(f"Camera with serial {serial} not found.")
+
+    def enable_filters_for_serial(self, serial: str):
+        """
+        해당 시리얼 번호를 가진 카메라에 대해 Post-Processing 필터를 생성하고 설정합니다.
+        """
+        if serial not in self.pipelines:
+            logging.warning(f"Cannot enable filters: Camera {serial} not initialized.")
+            return
+
+        logging.info(f"✨ Enabling Depth Filters for Camera {serial}")
+        
+        # 필터 객체 생성 및 옵션 설정
+        decimation = rs.decimation_filter()
+        decimation.set_option(rs.option.filter_magnitude, 1) # 해상도 유지 (필요시 조절)
+
+        temporal = rs.temporal_filter()
+        temporal.set_option(rs.option.filter_smooth_alpha, 0.4) # 떨림 vs 잔상 타협점
+        temporal.set_option(rs.option.filter_smooth_delta, 20)
+        # temporal.set_option(rs.option.holes_fill, 3) # Temporal 자체 persistence 사용 가능
+
+        # 딕셔너리에 저장
+        self.filters[serial] = {
+            'decimation': decimation,
+            'temporal': temporal
+        }
 
     def start(self):
         if not self.pipelines:
@@ -138,6 +165,17 @@ class MultiRealsense:
                     continue
 
                 # logging.info(f"[{serial}] capture successful.")
+
+                # [추가] 필터 적용 로직
+                # 해당 시리얼 번호에 필터가 등록되어 있다면 적용
+                if serial in self.filters:
+                    filters = self.filters[serial]
+                    
+                    # 필터 체인 적용 (Spatial -> Temporal -> Hole Filling)
+                    # Decimation은 Align 후에 적용하면 해상도가 틀어질 수 있어 주의 필요 (여기선 제외하거나 맨 앞에 적용)
+                    # depth_frame = filters['decimation'].process(depth_frame) 
+                    
+                    depth_frame = filters['temporal'].process(depth_frame)
 
                 # ✅ 센서 timestamp 사용 (ms) -> seconds
                 # color 기준으로 timestamp 사용 (depth도 같은 frameset 기반이라 근접)

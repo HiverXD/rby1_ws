@@ -6,6 +6,7 @@ from typing import Union
 import json
 import numpy as np
 import numpy as np
+import time
 from setup import SystemContext, Settings
 from helper import *
 import threading
@@ -36,15 +37,15 @@ def setup_meta_quest_udp_communication(local_ip: str, local_port: int, meta_ques
                         primary_button = buttons["primaryButton"]
                         secondary_button = buttons["secondaryButton"]
 
-                        SystemContext.vr_state.event_left_a_pressed |= primary_button
+                        SystemContext.vr_state.event_left_a_pressed |= primary_button  #X button
                         SystemContext.vr_state.event_left_b_pressed |= secondary_button
 
-                        # HACK: record/stop trigger
-                        if primary_button: # NOTE: equivalent to 'X' in left controller
-                            if power_off is not None:
-                                logging.warning("Left X button pressed. Shutting down power.")
-                                power_off()
-                            pass
+                        # # HACK: record/stop trigger
+                        # if primary_button: # NOTE: equivalent to 'X' in left controller
+                        #     if power_off is not None:
+                        #         logging.warning("Left X button pressed. Shutting down power.")
+                        #         power_off()
+                        #     pass
 
                     if "right" in SystemContext.vr_state.controller_state["hands"]:
                         buttons = SystemContext.vr_state.controller_state["hands"]["right"]["buttons"]
@@ -62,9 +63,11 @@ def setup_meta_quest_udp_communication(local_ip: str, local_port: int, meta_ques
 
 started = False
 torso_mode = False  # 글로벌 상태로 변경
+last_x_button_time = 0  # X 버튼 마지막 입력 시간 (debounce용)
+X_BUTTON_DEBOUNCE_TIME = 0.5  # 0.5초 이상의 간격만 인정
 
 def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool):
-    global started, torso_mode
+    global started, torso_mode, last_x_button_time
     model = robot.model()
     torso_dof = len(model.torso_idx)
     head_dof = len(model.head_idx)
@@ -192,12 +195,64 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
                 SystemContext.h5_writer.stop()
                 logging.info("H5 writer stopped and file saved")
         except Exception as e:
-            logging.warning(f"Failed to stop H5 writer: {e}")
-        
-
-        
+            logging.warning(f"Failed to stop H5 writer: {e}")    
 
         SystemContext.vr_state.is_stopped = True
+
+    elif SystemContext.vr_state.event_left_a_pressed:
+        # Debounce: X 버튼 연타 방지 (0.5초 이상의 간격만 인정)
+        current_time = time.time()
+        if current_time - last_x_button_time < X_BUTTON_DEBOUNCE_TIME:
+            logging.debug(f"X button debounced (interval: {current_time - last_x_button_time:.3f}s < {X_BUTTON_DEBOUNCE_TIME}s)")
+        else:
+            last_x_button_time = current_time
+            logging.info(f"Left X button pressed. Current demo recording status: {SystemContext.demo_recording_status}")
+            
+            if SystemContext.demo_recording_status == "idle":
+                # First press: Start recording
+                logging.info("Starting demo recording")
+                SystemContext.demo_recording_status = "recording"
+                SystemContext.start_new_recording_requested = True
+                SystemContext.vr_state.is_initialized = True
+                SystemContext.vr_state.is_stopped = False
+                
+            elif SystemContext.demo_recording_status == "recording":
+                # Second press: Stop recording
+                logging.info("Stopping demo recording")
+                SystemContext.demo_recording_status = "stopping"
+                
+                # Stop the demo logger and H5 writer
+                try:
+                    if SystemContext.rec_stop_event is not None:
+                        SystemContext.rec_stop_event.set()
+                        logging.info("Signaled demo logger to stop")
+                except Exception as e:
+                    logging.warning(f"Failed to signal demo logger: {e}")
+
+                try:
+                    if SystemContext.h5_writer is not None:
+                        SystemContext.h5_writer.stop()
+                        logging.info("H5 writer stopped and file saved")
+                except Exception as e:
+                    logging.warning(f"Failed to stop H5 writer: {e}")
+                
+                # Stop camera frames
+                try:
+                    if SystemContext.realsense is not None:
+                        SystemContext.realsense.stop()
+                        logging.info("Camera stopped")
+                except Exception as e:
+                    logging.warning(f"Failed to stop camera: {e}")
+
+                SystemContext.vr_state.is_stopped = True
+                
+            elif SystemContext.demo_recording_status == "stopping":
+                # Third press: Start new recording
+                logging.info("Starting new demo recording")
+                SystemContext.demo_recording_status = "recording"
+                SystemContext.start_new_recording_requested = True
+                SystemContext.vr_state.is_initialized = True
+                SystemContext.vr_state.is_stopped = False
 
     else:
         return False, torso_mode

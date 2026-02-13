@@ -5,6 +5,8 @@ import yaml
 import logging
 import rby1_sdk as rby
 from typing import Union
+import cv2
+import h5py
 
 def rosimg_to_numpy(msg: Image) -> np.ndarray:
     """Convert sensor_msgs/Image → np.ndarray (HxWxC, uint8)."""
@@ -14,13 +16,18 @@ def rosimg_to_numpy(msg: Image) -> np.ndarray:
     return img
 
 
-def get_next_h5_path(base_dir="/home/nvidia/rby1_ws/rby1-data-collection/data"):
+def get_next_h5_path(base_dir="/home/nvidia/rby1_ws/rby1-data-collection/Demo"):
 # def get_next_h5_path(base_dir="/media/nvidia/T7/Demo"):
-    # Count existing .h5 files
-    existing = [f for f in os.listdir(base_dir) if f.endswith(".h5")]
+    # Count existing episode folders
+    existing = [d for d in os.listdir(base_dir) if d.startswith("episode_") and os.path.isdir(os.path.join(base_dir, d))]
     next_index = len(existing)
-    # Create new path
-    return os.path.join(base_dir, f"demo_{next_index}.h5")
+    
+    # Create episode folder
+    episode_dir = os.path.join(base_dir, f"episode_{next_index}")
+    os.makedirs(episode_dir, exist_ok=True)
+    
+    # Create path for h5 file inside episode folder
+    return os.path.join(episode_dir, f"demo_{next_index}.h5")
 
 
 def elbows_bending_check(robot: rby.Robot_A) -> bool:
@@ -87,3 +94,60 @@ def elbows_bending_check(robot: rby.Robot_A) -> bool:
 
     return False
 
+def save_video(h5_path, output_filename="robot_video.avi", camera_name='head', fps=30):
+    if not os.path.exists(h5_path):
+        logging.warning(f"❌ 파일을 찾을 수 없습니다.")
+        return
+
+    rgb_key = f'{camera_name}_rgb'
+    depth_key = f'{camera_name}_depth'
+
+    # H5 파일이 있는 '폴더 경로' 추출
+    # 예: /home/user/Task/episode1/data.h5 -> /home/user/Task/episode1
+    dir_path = os.path.dirname(os.path.abspath(h5_path))
+    
+    # 저장할 전체 경로 생성
+    # 예: /home/user/Task/episode1 + video.avi
+    save_path = os.path.join(dir_path, output_filename)
+
+    with h5py.File(h5_path, 'r') as f:
+        if rgb_key not in f:
+            logging.warning("❌ 데이터가 없습니다.")
+            return
+
+        # 1. 데이터 로드 (전체 프레임)
+        rgb_data = f[f'{rgb_key}/image'][:]
+        has_depth = (depth_key in f)
+        if has_depth:
+            depth_data = f[f'{depth_key}/image'][:]
+        
+        num_frames, height, width, _ = rgb_data.shape
+        
+        # 2. 화면 크기 설정 (Depth 있으면 가로 2배)
+        output_width = width * 2 if has_depth else width
+        
+        # 3. 비디오 작성자 설정 (MJPG 코덱 사용 -> 안전함)
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG') 
+        out = cv2.VideoWriter(output_filename, fourcc, fps, (output_width, height))
+
+        # 4. 프레임 쓰기
+        for i in range(num_frames):
+            img = rgb_data[i]
+            # RGB -> BGR 변환 (OpenCV 저장용)
+            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+            if has_depth:
+                d_img = depth_data[i]
+                # Depth 컬러 입히기
+                d_norm = cv2.normalize(d_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                d_color = cv2.applyColorMap(d_norm, cv2.COLORMAP_JET)
+                
+                # 합치기
+                combined = np.hstack((img_bgr, d_color))
+                out.write(combined)
+            else:
+                out.write(img_bgr)
+        
+        out.release()
+
+    logging.info(f"✅ 저장 완료! 파일 위치: {save_path}")

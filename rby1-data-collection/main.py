@@ -71,7 +71,7 @@ def publish_gv(sock: zmq.Socket):
         time.sleep(0.1)
 
 def get_config():
-    with open('rby1-data-collection/config.yaml', encoding='utf-8') as f:
+    with open('/home/hyunjin/RBY1_migration/rby1_ws/rby1-data-collection/config.yaml', encoding='utf-8') as f:
         config = yaml.safe_load(f)
         return config
 
@@ -97,6 +97,8 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
     config = get_config()
     # Get camera configuration from the config file
     cameras_config = config.get('cameras', {})
+    if cameras_config is None:
+        cameras_config = {}
     if not cameras_config:
         logging.warning("No camera configuration found in config.yaml. Camera streams will not be processed.")
     
@@ -104,7 +106,13 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
     img_size = config.get('img_size', {'width': 640, 'height': 480})
 
     realsense = MultiRealsense(camera_serials=camera_serials, width=img_size['width'], height=img_size['height'])
+    for cam_id, spec in cameras_config.items():
+        serial = spec['serial']
+    
     realsense.start()
+    
+    # Store realsense object in SystemContext for access from other threads
+    SystemContext.realsense = realsense
 
     cam_ids = list(cameras_config.keys())
 
@@ -114,19 +122,34 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
         next_t = time.perf_counter()
 
         while not stop_event.is_set():
-            # Thread-safe snapshot of latest camera frames
+            # Thread-safe snapshot of latest camera frames (optional)
             frames = realsense.get_frames()
 
+            # If no frames, still collect robot data
             if not frames:
-                time.sleep(period)
-                continue
+                frames = {}  # Empty dict instead of continue
+            
+            time.sleep(period)
 
-            # Use the first camera in cam_ids for primary tasks like PCD generation.
-            primary_cam_id = next(iter(frames.keys()))
-            primary_cam_data = frames[primary_cam_id]
-            frame = primary_cam_data.color
-            depth = primary_cam_data.depth
-            frame_stamp = primary_cam_data.t
+            # Use the first camera in cam_ids for primary tasks like PCD generation (if available).
+            primary_cam_id = None
+            primary_cam_data = None
+            frame = None
+            depth = None
+            frame_stamp = None
+            
+            if frames:
+                try:
+                    primary_cam_id = next(iter(frames.keys()))
+                    primary_cam_data = frames[primary_cam_id]
+                    frame = primary_cam_data.color
+                    depth = primary_cam_data.depth
+                    frame_stamp = primary_cam_data.t
+                except Exception as e:
+                    logging.warning(f"[demo_logger] Failed to get primary camera data: {e}")
+                    frame = None
+                    depth = None
+                    frame_stamp = None
 
             # Robot joint positions - 현재 포지션 읽기
             robot_pos = None
@@ -163,23 +186,13 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             except Exception as e:
                 logging.warning(f"[demo_logger] Failed to read base velocity: {e}")
 
-            # Initialize button states
-            right_arm_pressed = False
-            right_grip_pressed = False
-            left_arm_pressed = False
-            left_grip_pressed = False
+            '''
+            x 버튼 한번 누르면 데이터 수집 시작
+            x 버튼 한번 더 누르면 데이터 수집 종료 및 저장
+            x 버튼 다시 누르면 새로운 데모 수집
+            '''
 
-            # 왼손 오른손 작동 그립 넷 중 하나 눌렀으면 데이터 수집
-            if "hands" in SystemContext.vr_state.controller_state and "right" in SystemContext.vr_state.controller_state["hands"]:
-                right_arm_pressed = SystemContext.vr_state.controller_state["hands"]["right"]["buttons"]["grip"] > 0.8
-                right_grip_pressed = SystemContext.vr_state.controller_state["hands"]["right"]["buttons"]["trigger"] > 0.8
-
-            if "hands" in SystemContext.vr_state.controller_state and "left" in SystemContext.vr_state.controller_state["hands"]:
-                left_arm_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["grip"] > 0.8          
-                left_grip_pressed = SystemContext.vr_state.controller_state["hands"]["left"]["buttons"]["trigger"] > 0.8
-
-            data_collection_bool = args.data_collect and (right_arm_pressed or left_arm_pressed or right_grip_pressed or left_grip_pressed)
-            
+            data_collection_bool = args.data_collect
             # logging.info(f"data_collection_bool activated: {data_collection_bool}")
 
             if data_collection_bool:
@@ -295,15 +308,16 @@ def main(args: argparse.Namespace):
     os.makedirs(root_path, exist_ok=True)
 
     # start writing
+    # H5 file will be created only when X button is pressed
     output_path = None
     h5_writer = None
     if args.data_collect:
-        output_path = get_next_h5_path(root_path)
-        h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
+        logging.info("Data collection mode enabled - H5 file will be created when X button is pressed")
 
     def power_off_and_stop():
-        if args.data_collect:
+        if args.data_collect and rec_data is not None:
             rec_data.set()  # stop signal for logging thread
+        if h5_writer is not None:
             h5_writer.stop()  # save h5 file and exit
         robot.power_off(".*")
         for cleanup_func in SystemContext.cleanup_functions:
@@ -342,9 +356,12 @@ def main(args: argparse.Namespace):
     # Initialize cleanup functions container before starting subsystems
     SystemContext.cleanup_functions = []
 
+    # Only start recording when X button is pressed, not at startup
     if args.data_collect:
-        rec_data = start_demo_logger(gripper, h5_writer, robot, fps=Settings.rec_fps)
-        logging.info("data handler run started")
+        logging.info("Data collection mode enabled - recording will start when X button is pressed")
+        SystemContext.demo_recording_status = "idle"
+    else:
+        SystemContext.demo_recording_status = "idle"
 
 
     # expose writer and stop-event so button handlers can stop and save
@@ -376,6 +393,24 @@ def main(args: argparse.Namespace):
         if SystemContext.vr_state.joint_positions.size == 0:
             continue
         button_event, torso_mode = handle_vr_button_event(robot, args.no_head)
+
+        # Handle new recording request
+        if SystemContext.start_new_recording_requested:
+            logging.info("Handling new recording request")
+            SystemContext.start_new_recording_requested = False
+            
+            # Create new H5 file path and writer
+            output_path = get_next_h5_path(root_path)
+            h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
+            
+            # Start new demo logger
+            rec_data = start_demo_logger(gripper, h5_writer, robot, fps=Settings.rec_fps)
+            
+            # Update SystemContext
+            SystemContext.h5_writer = h5_writer
+            SystemContext.rec_stop_event = rec_data
+            
+            logging.info(f"New recording started: {output_path}")
         
         if button_event:
             if stream is not None:
@@ -663,7 +698,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    with open("rby1-data-collection/config.yaml", encoding='utf-8') as f:
+    with open("/home/hyunjin/RBY1_migration/rby1_ws/rby1-data-collection/config.yaml", encoding='utf-8') as f:
         config = yaml.safe_load(f)
         user_pc_ip = config['user_pc_ip']
         metaquest_ip = config['metaquest_ip']
