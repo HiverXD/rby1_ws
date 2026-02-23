@@ -13,3 +13,7 @@ __pycache__/*
 *.gltf
 *.json
 *.parquet
+*.mp4
+*.avi
+ok_robot_manipulation/src/checkpoints/
+rby1-data-collection/Sample/
