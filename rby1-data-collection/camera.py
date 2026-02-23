@@ -43,6 +43,11 @@ class MultiRealsense:
 
         self.filters: Dict[str, Dict] = {} #key: Serial Number
 
+        # Timeout/recovery settings for long-running capture sessions
+        self.frame_wait_timeout_ms: int = 5000
+        self.max_consecutive_timeouts: int = 3
+        self.restart_cooldown_sec: float = 2.0
+
         self.running = False
 
         # 카메라별 캡처 스레드 + 동기화 스레드
@@ -118,7 +123,9 @@ class MultiRealsense:
             
             while retry_count < max_retries:
                 try:
-                    self.pipelines[serial].start(self.configs[serial])
+                    profile = self.pipelines[serial].start(self.configs[serial])
+                    self._apply_auto_controls(profile, serial)
+
                     logging.info(f"Pipeline started for camera {serial}")
                     started_serials.append(serial)
                     break
@@ -146,16 +153,61 @@ class MultiRealsense:
         self.sync_thread = threading.Thread(target=self._sync_loop, daemon=True)
         self.sync_thread.start()
 
+    def _apply_auto_controls(self, profile, serial: str):
+        # Ensure color auto controls are enabled for stable RGB color.
+        try:
+            dev = profile.get_device()
+            for sensor in dev.query_sensors():
+                if sensor.supports(rs.option.enable_auto_exposure):
+                    sensor.set_option(rs.option.enable_auto_exposure, 1)
+                if sensor.supports(rs.option.enable_auto_white_balance):
+                    sensor.set_option(rs.option.enable_auto_white_balance, 1)
+        except Exception as e:
+            logging.warning(f"[{serial}] failed to set auto exposure/white balance: {e}")
+
+    def _restart_pipeline(self, serial: str) -> bool:
+        if serial not in self.pipelines:
+            return False
+
+        pipe = self.pipelines[serial]
+        cfg = self.configs[serial]
+
+        try:
+            pipe.stop()
+        except Exception:
+            pass
+
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                profile = pipe.start(cfg)
+                self._apply_auto_controls(profile, serial)
+                with self.lock:
+                    if serial in self.buffers:
+                        self.buffers[serial].clear()
+                    self.synced_frames = {}
+                logging.info(f"[{serial}] pipeline restart succeeded (attempt {attempt}/{max_retries})")
+                return True
+            except Exception as e:
+                logging.warning(f"[{serial}] pipeline restart failed (attempt {attempt}/{max_retries}): {e}")
+                time.sleep(0.5)
+
+        logging.error(f"[{serial}] pipeline restart failed after {max_retries} attempts")
+        return False
+
     def _capture_loop(self, serial: str):
         """
         카메라 1대당 1스레드로 프레임을 지속 수집해 버퍼에 적재.
         """
         pipe = self.pipelines[serial]
         align = self.aligns[serial]
+        consecutive_timeouts = 0
+        last_timeout_log_t = 0.0
+        last_restart_t = 0.0
 
         while self.running:
             try:
-                frameset = pipe.wait_for_frames(timeout_ms=5000)  # Increased timeout
+            frameset = pipe.wait_for_frames(timeout_ms=self.frame_wait_timeout_ms)
                 aligned = align.process(frameset)
 
                 depth_frame = aligned.get_depth_frame()
@@ -195,8 +247,43 @@ class MultiRealsense:
                 with self.lock:
                     self.buffers[serial].append(fr)
 
+                # frame received successfully: reset timeout counter
+                consecutive_timeouts = 0
+
             except Exception as e:
+                msg = str(e).lower()
+                is_timeout = (
+                    ("timeout" in msg)
+                    or ("timed out" in msg)
+                    or ("frame didn't arrive" in msg)
+                )
+
+                if is_timeout:
+                    consecutive_timeouts += 1
+                    now = time.perf_counter()
+
+                    if now - last_timeout_log_t > 1.0:
+                        logging.warning(
+                            f"[{serial}] frame timeout ({consecutive_timeouts}/{self.max_consecutive_timeouts})"
+                        )
+                        last_timeout_log_t = now
+
+                    if (
+                        consecutive_timeouts >= self.max_consecutive_timeouts
+                        and (now - last_restart_t) >= self.restart_cooldown_sec
+                    ):
+                        logging.error(f"[{serial}] too many frame timeouts, restarting pipeline...")
+                        self._restart_pipeline(serial)
+                        # refresh local references after restart
+                        pipe = self.pipelines[serial]
+                        align = self.aligns[serial]
+                        last_restart_t = now
+                        consecutive_timeouts = 0
+
+                    continue
+
                 logging.warning(f"[{serial}] capture failed: {e}")
+                time.sleep(0.05)
                 continue
 
     def _sync_loop(self):
@@ -285,3 +372,8 @@ class MultiRealsense:
                 logging.info(f"Pipeline stopped for camera {serial}")
             except Exception as e:
                 logging.error(f"Failed to stop pipeline for camera {serial}: {e}")
+
+        self.capture_threads = {}
+        self.sync_thread = None
+        with self.lock:
+            self.synced_frames = {}

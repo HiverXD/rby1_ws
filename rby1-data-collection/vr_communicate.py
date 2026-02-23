@@ -236,13 +236,9 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
                 except Exception as e:
                     logging.warning(f"Failed to stop H5 writer: {e}")
                 
-                # Stop camera frames
-                try:
-                    if SystemContext.realsense is not None:
-                        SystemContext.realsense.stop()
-                        logging.info("Camera stopped")
-                except Exception as e:
-                    logging.warning(f"Failed to stop camera: {e}")
+                # Keep camera stream alive between recordings.
+                # This avoids repeated warm-up and reduces startup latency/color instability.
+                logging.info("Camera stream kept running for next recording session")
 
                 SystemContext.vr_state.is_stopped = True
                 

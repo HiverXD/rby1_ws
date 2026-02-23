@@ -102,34 +102,49 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
     if not cameras_config:
         logging.warning("No camera configuration found in config.yaml. Camera streams will not be processed.")
     
-    camera_serials = [spec['serial'] for spec in cameras_config.values()]
+    cam_names = list(cameras_config.keys())
+    cam_name_to_serial = {cam_name: spec['serial'] for cam_name, spec in cameras_config.items()}
+    camera_serials = [cam_name_to_serial[cam_name] for cam_name in cam_names]
+    serial_to_cam_name = {v: k for k, v in cam_name_to_serial.items()}
+    expected_serials = set(camera_serials)
+    primary_serial = camera_serials[0] if camera_serials else None
     img_size = config.get('img_size', {'width': 640, 'height': 480})
+    camera_warmup_secs = float(config.get('camera_warmup_secs', 2.0))
+    camera_warmup_frames = int(config.get('camera_warmup_frames', max(15, int(fps))))
 
-    realsense = MultiRealsense(camera_serials=camera_serials, width=img_size['width'], height=img_size['height'])
-    for cam_id, spec in cameras_config.items():
-        serial = spec['serial']
-    
-    realsense.start()
-    
-    # Store realsense object in SystemContext for access from other threads
-    SystemContext.realsense = realsense
+    realsense_obj = SystemContext.realsense
+    realsense = realsense_obj if isinstance(realsense_obj, MultiRealsense) else None
+    if realsense is None or not getattr(realsense, "running", False):
+        realsense = MultiRealsense(camera_serials=camera_serials, width=img_size['width'], height=img_size['height'])
+        for cam_id, spec in cameras_config.items():
+            serial = spec['serial']
 
-    cam_ids = list(cameras_config.keys())
+        realsense.start()
 
+        # Store realsense object in SystemContext for access from other threads
+        SystemContext.realsense = realsense
+        # Warm-up should run once per camera stream lifecycle.
+        SystemContext.camera_warmup_done = False
+        logging.info("Started RealSense streams (warm-up will run once).")
+    else:
+        logging.info("Reusing existing RealSense streams (warm-up already done).")
 
     def _loop():
         logging.info("loop started")
         next_t = time.perf_counter()
+        record_start_t = time.perf_counter()
+        last_logged_primary_ts = None
+        last_camera_wait_warn_t = 0.0
+        last_warmup_warn_t = 0.0
+        warmup_unique_frames = 0
+        last_warmup_primary_ts = None
 
         while not stop_event.is_set():
             # Thread-safe snapshot of latest camera frames (optional)
             frames = realsense.get_frames()
 
-            # If no frames, still collect robot data
             if not frames:
-                frames = {}  # Empty dict instead of continue
-            
-            time.sleep(period)
+                frames = {}
 
             # Use the first camera in cam_ids for primary tasks like PCD generation (if available).
             primary_cam_id = None
@@ -137,10 +152,10 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             frame = None
             depth = None
             frame_stamp = None
-            
-            if frames:
+
+            if frames and primary_serial is not None and primary_serial in frames:
                 try:
-                    primary_cam_id = next(iter(frames.keys()))
+                    primary_cam_id = primary_serial
                     primary_cam_data = frames[primary_cam_id]
                     frame = primary_cam_data.color
                     depth = primary_cam_data.depth
@@ -150,6 +165,85 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                     frame = None
                     depth = None
                     frame_stamp = None
+
+            # Strict synchronization rule for dataset recording:
+            # record only when every configured camera exists and primary frame timestamp is fresh.
+            data_collection_bool = args.data_collect
+            if data_collection_bool and expected_serials:
+                missing_serials = expected_serials - set(frames.keys())
+                if missing_serials:
+                    now_t = time.perf_counter()
+                    if now_t - last_camera_wait_warn_t > 1.0:
+                        missing_names = [serial_to_cam_name.get(s, s) for s in sorted(missing_serials)]
+                        logging.warning(
+                            f"[demo_logger] Missing synced frames from cameras={missing_names}. "
+                            "Skip this timestep to keep robot/image counts aligned."
+                        )
+                        last_camera_wait_warn_t = now_t
+
+                    next_t += period
+                    sleep_for = next_t - time.perf_counter()
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
+                    else:
+                        next_t = time.perf_counter()
+                    continue
+
+                if frame_stamp is None:
+                    next_t += period
+                    sleep_for = next_t - time.perf_counter()
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
+                    else:
+                        next_t = time.perf_counter()
+                    continue
+
+                if last_logged_primary_ts is not None and frame_stamp <= (last_logged_primary_ts + 1e-6):
+                    # No new camera frame yet; skip to avoid duplicated image samples.
+                    next_t += period
+                    sleep_for = next_t - time.perf_counter()
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
+                    else:
+                        next_t = time.perf_counter()
+                    continue
+
+                # Camera warm-up gate (process-level one-time):
+                # drop initial frames while auto-exposure/auto-white-balance converges.
+                if not SystemContext.camera_warmup_done:
+                    if frame_stamp is not None and (
+                        last_warmup_primary_ts is None or frame_stamp > (last_warmup_primary_ts + 1e-6)
+                    ):
+                        warmup_unique_frames += 1
+                        last_warmup_primary_ts = frame_stamp
+
+                    elapsed = time.perf_counter() - record_start_t
+                    warmup_done = (
+                        (elapsed >= camera_warmup_secs)
+                        and (warmup_unique_frames >= camera_warmup_frames)
+                    )
+
+                    if not warmup_done:
+                        now_t = time.perf_counter()
+                        if now_t - last_warmup_warn_t > 1.0:
+                            logging.info(
+                                "[demo_logger] Camera warm-up in progress "
+                                f"(elapsed={elapsed:.2f}s/{camera_warmup_secs:.2f}s, "
+                                f"frames={warmup_unique_frames}/{camera_warmup_frames}). "
+                                "Skip initial unstable frames."
+                            )
+                            last_warmup_warn_t = now_t
+
+                        next_t += period
+                        sleep_for = next_t - time.perf_counter()
+                        if sleep_for > 0:
+                            time.sleep(sleep_for)
+                        else:
+                            next_t = time.perf_counter()
+                        continue
+
+                    SystemContext.camera_warmup_done = True
+                    logging.info("[demo_logger] Camera warm-up completed (process-level one-time).")
 
             # Robot joint positions - 현재 포지션 읽기
             robot_pos = None
@@ -163,8 +257,6 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             except Exception as e:
                 logging.warning(f"[demo_logger] Failed to read robot position: {e}")
             
-            # 이전 스텝의 robot_target_joints를 현재 robot_pos로 업데이트
-            h5_writer.update_previous_target(robot_pos)
             robot_target_joints = robot_pos
 
             # Gripper encoders (actual measured state)
@@ -192,7 +284,6 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             x 버튼 다시 누르면 새로운 데모 수집
             '''
 
-            data_collection_bool = args.data_collect
             # logging.info(f"data_collection_bool activated: {data_collection_bool}")
 
             if data_collection_bool:
@@ -207,7 +298,7 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                         
                         # Determine intrinsics based on depth image size
                         H_d, W_d = depth_frame.shape
-                        if W_d == 848 and H_d == 480:
+                        if W_d == 848 and H_d == 480:                      
                             intrinsics = REALSENSE_D435_INTRINSICS_848x480
                         else:
                             intrinsics = REALSENSE_D435_INTRINSICS
@@ -219,7 +310,7 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                                 rgb_frame = cv2.resize(rgb_frame, (depth_frame.shape[1], depth_frame.shape[0]))
                             except ImportError:
                                 logging.warning("[demo_logger] cv2 not available for RGB resize")
-                        depth_frame_for_pcd = np.where(depth_frame > 3000, 0, depth_frame)
+                        depth_frame_for_pcd = np.where(depth_frame > 3000, 0, depth_frame)  
                         # Convert to point cloud (all points, no downsampling)
                         pcd_points, pcd_colors = rgbd_to_pointcloud(
                             rgb_frame, depth_frame_for_pcd,
@@ -237,6 +328,12 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                         logging.warning(f"[demo_logger] Failed to generate PCD: {e}")
                 
                 
+                # Align global sample timestamp to camera timestamp
+                sample_ts = float(frame_stamp) if frame_stamp is not None else time.time()
+
+                # Update previous step's target only when we are actually committing a sample.
+                h5_writer.update_previous_target(robot_pos)
+
                 print("demo saved\n")
                 # print("robot_pose shape: ", robot_pos.shape)
                 # print("robot_target_joints shape: ", robot_target_joints.shape)
@@ -247,7 +344,7 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
 
                 # Create a dynamic dictionary to hold data for all cameras
                 data_to_save = {
-                    "ts": time.time(),
+                    "ts": sample_ts,
                     "robot_position": robot_pos,
                     "robot_target_joints": robot_target_joints,
                     "gripper_state": grip,
@@ -258,15 +355,22 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                 }
 
                 # Iterate through all available cameras and add their data to the dictionary
-                for cam_id, cam_name in zip(frames.keys(), cam_ids):
+                for cam_name in cam_names:
+                    cam_id = cam_name_to_serial[cam_name]
+                    if cam_id not in frames:
+                        # Should not happen due strict check above, but keep safe.
+                        continue
                     logging.info(f"{cam_name} image is saving")
                     cam_data = frames[cam_id]
                     data_to_save[f"{cam_name}_rgb"] = cam_data.color
                     data_to_save[f"{cam_name}_rgb_ts"] = cam_data.t
-                    data_to_save[f"{cam_name}_depth"] = cam_data.depth
-                    data_to_save[f"{cam_name}_depth_ts"] = cam_data.t
+                    if cam_data.depth is not None:
+                        data_to_save[f"{cam_name}_depth"] = cam_data.depth
+                        data_to_save[f"{cam_name}_depth_ts"] = cam_data.t
                     # logging.info(f"{cam_data} color frame is {cam_data.color}")
                 h5_writer.put(data_to_save)
+                if frame_stamp is not None:
+                    last_logged_primary_ts = frame_stamp
 
             # pacing at ~30 FPS with drift correction
             next_t += period
@@ -282,11 +386,10 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
     logging.info(f"Started demo logger at {fps} FPS")
 
     # This is a bit of a hack. The _loop will run until the main thread exits.
-    # We return a stop_event that can be used to signal the loop to stop,
-    # and we also add a cleanup function to stop the realsense cameras.
+    # We return a stop_event that can be used to signal the loop to stop.
+    # Camera stop is handled at process shutdown, so streams can be reused across demos.
     def cleanup():
         stop_event.set()
-        realsense.stop()
 
     SystemContext.cleanup_functions.append(cleanup)
     
@@ -319,6 +422,11 @@ def main(args: argparse.Namespace):
             rec_data.set()  # stop signal for logging thread
         if h5_writer is not None:
             h5_writer.stop()  # save h5 file and exit
+        if isinstance(SystemContext.realsense, MultiRealsense):
+            try:
+                SystemContext.realsense.stop()
+            except Exception as e:
+                logging.warning(f"Failed to stop camera during shutdown: {e}")
         robot.power_off(".*")
         for cleanup_func in SystemContext.cleanup_functions:
             cleanup_func()

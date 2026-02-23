@@ -1,6 +1,6 @@
 import numpy as np
 from dataclasses import dataclass
-from typing import Union, Optional
+from typing import Union, Optional, Any
 import threading
 import rby1_sdk as rby
 from h5py_writer import H5Writer
@@ -50,12 +50,13 @@ class SystemContext:
     robot_model: Union[rby.Model_A, rby.Model_M] = None
     vr_state: VRControlState = VRControlState()
     # H5 writer and recording stop-event stored here so other threads/handlers can access them
-    h5_writer: Optional[H5Writer] = None
+    h5_writer: Optional[Any] = None
     rec_stop_event: Optional[threading.Event] = None
     cleanup_functions: list = []  # Functions to call on cleanup
     
     # Camera object for stopping frames when recording stops
     realsense: Optional[object] = None
+    camera_warmup_done: bool = False
     
     # Demo recording state management
     demo_recording_status: str = "idle"  # "idle", "recording", "stopping"

@@ -105,7 +105,16 @@ class H5Writer:
         camera_groups = list(cams.keys())
         d_cam_data = {}  # {'head': {'time': dataset, 'img': dataset, 'idx': 0}, ...}
         for cam in camera_groups:
-            d_cam_data[cam] = {'time': None, 'img': None, 'idx': 0, 'depth_time': None, 'depth_img': None, 'depth_idx': 0}
+            d_cam_data[cam] = {
+                'time': None,
+                'img': None,
+                'sample_idx': None,
+                'idx': 0,
+                'depth_time': None,
+                'depth_img': None,
+                'depth_sample_idx': None,
+                'depth_idx': 0,
+            }
 
         # PCD datasets
         d_pcd_time = d_pcd_points = d_pcd_colors = None
@@ -208,6 +217,10 @@ class H5Writer:
                                     "image", shape=(0, H, W, C), maxshape=(None, H, W, C),
                                     dtype="u1", chunks=(1, H, W, C), compression="gzip"
                                 )
+                                d_cam_data[cam]['sample_idx'] = camera_grps[cam]['rgb'].create_dataset(
+                                    "sample_index", shape=(0,), maxshape=(None,), dtype="i8",
+                                    chunks=True, compression="gzip"
+                                )
                                 logging.info(f"[h5_writer] Successfully created {key} dataset")
                             except Exception as e:
                                 logging.warning(f"[h5_writer] Failed to create {key} dataset: {e}")
@@ -236,6 +249,10 @@ class H5Writer:
                                 d_cam_data[cam]['depth_img'] = camera_grps[cam]['depth'].create_dataset(
                                     "image", shape=(0, H_d, W_d), maxshape=(None, H_d, W_d),
                                     dtype="u2", chunks=(1, H_d, W_d), compression="gzip"
+                                )
+                                d_cam_data[cam]['depth_sample_idx'] = camera_grps[cam]['depth'].create_dataset(
+                                    "sample_index", shape=(0,), maxshape=(None,), dtype="i8",
+                                    chunks=True, compression="gzip"
                                 )
                                 logging.info(f"[h5_writer] Successfully created {key} dataset")
                             except Exception as e:
@@ -348,10 +365,10 @@ class H5Writer:
                 # ----- Append camera frames (independent index) -----
                 for cam in camera_groups:
                     if batch and (d_cam_data[cam]['img'] is not None):
-                        cam_times, cam_imgs = [], []
+                        cam_times, cam_imgs, cam_sample_indices = [], [], []
                         key_rgb = f"{cam}_rgb"
                         key_rgb_ts = f"{cam}_rgb_ts"
-                        for s in batch:
+                        for local_i, s in enumerate(batch):
                             if s.get(key_rgb) is not None:
                                 try:
                                     img = np.asarray(s[key_rgb])
@@ -363,6 +380,7 @@ class H5Writer:
                                         continue
                                     cam_imgs.append(img.astype(np.uint8, copy=False))
                                     cam_times.append(float(s.get(key_rgb_ts, s["ts"])))
+                                    cam_sample_indices.append(idx + local_i)
                                 except Exception as e:
                                     logging.warning(f"[h5_writer] Failed to process {key_rgb}: {e}")
                                     continue
@@ -377,6 +395,12 @@ class H5Writer:
                                 d_cam_data[cam]['img'].resize((cam_idx + n_new_cam, *d_cam_data[cam]['img'].shape[1:]))
                                 d_cam_data[cam]['img'][cam_idx: cam_idx + n_new_cam, ...] = np.stack(cam_imgs, axis=0)
 
+                                if d_cam_data[cam]['sample_idx'] is not None:
+                                    d_cam_data[cam]['sample_idx'].resize((cam_idx + n_new_cam,))
+                                    d_cam_data[cam]['sample_idx'][cam_idx: cam_idx + n_new_cam] = np.asarray(
+                                        cam_sample_indices, dtype=np.int64
+                                    )
+
                                 d_cam_data[cam]['idx'] += n_new_cam
                             except Exception as e:
                                 logging.warning(f"[h5_writer] Failed to append {key_rgb} frames: {e}")
@@ -384,11 +408,11 @@ class H5Writer:
                 # ----- Append depth frames (independent index) -----
                 for cam in camera_groups:
                     if batch and (d_cam_data[cam]['depth_img'] is not None):
-                        depth_times, depth_imgs = [], []
+                        depth_times, depth_imgs, depth_sample_indices = [], [], []
                         key_depth = f"{cam}_depth"
                         key_depth_ts = f"{cam}_depth_ts"
                         
-                        for s in batch:
+                        for local_i, s in enumerate(batch):
                             if s.get(key_depth) is not None:
                                 try:
                                     depth = np.asarray(s[key_depth])
@@ -400,6 +424,7 @@ class H5Writer:
                                         continue
                                     depth_imgs.append(depth.astype(np.uint16, copy=False))
                                     depth_times.append(float(s.get(key_depth_ts, s["ts"])))
+                                    depth_sample_indices.append(idx + local_i)
                                 except Exception as e:
                                     logging.warning(f"[h5_writer] Failed to process {key_depth}: {e}")
                                     continue
@@ -413,6 +438,12 @@ class H5Writer:
 
                                 d_cam_data[cam]['depth_img'].resize((depth_idx + n_new_depth, *d_cam_data[cam]['depth_img'].shape[1:]))
                                 d_cam_data[cam]['depth_img'][depth_idx: depth_idx + n_new_depth, ...] = np.stack(depth_imgs, axis=0)
+
+                                if d_cam_data[cam]['depth_sample_idx'] is not None:
+                                    d_cam_data[cam]['depth_sample_idx'].resize((depth_idx + n_new_depth,))
+                                    d_cam_data[cam]['depth_sample_idx'][depth_idx: depth_idx + n_new_depth] = np.asarray(
+                                        depth_sample_indices, dtype=np.int64
+                                    )
 
                                 d_cam_data[cam]['depth_idx'] += n_new_depth
                             except Exception as e:
@@ -496,5 +527,21 @@ class H5Writer:
 
         finally:
             if f is not None:
+                # Final consistency check: sample timeline vs camera timelines
+                try:
+                    for cam in camera_groups:
+                        if d_cam_data[cam]['img'] is not None and d_cam_data[cam]['idx'] != idx:
+                            logging.warning(
+                                f"[h5_writer] Count mismatch for {cam}_rgb: samples={idx}, frames={d_cam_data[cam]['idx']}. "
+                                "Use sample_index dataset for exact alignment."
+                            )
+                        if d_cam_data[cam]['depth_img'] is not None and d_cam_data[cam]['depth_idx'] != idx:
+                            logging.warning(
+                                f"[h5_writer] Count mismatch for {cam}_depth: samples={idx}, frames={d_cam_data[cam]['depth_idx']}. "
+                                "Use sample_index dataset for exact alignment."
+                            )
+                except Exception as e:
+                    logging.warning(f"[h5_writer] Failed to run final consistency check: {e}")
+
                 f.flush()
                 f.close()
