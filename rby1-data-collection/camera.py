@@ -207,7 +207,7 @@ class MultiRealsense:
 
         while self.running:
             try:
-            frameset = pipe.wait_for_frames(timeout_ms=self.frame_wait_timeout_ms)
+                frameset = pipe.wait_for_frames(timeout_ms=self.frame_wait_timeout_ms)
                 aligned = align.process(frameset)
 
                 depth_frame = aligned.get_depth_frame()

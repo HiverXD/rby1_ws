@@ -1,7 +1,9 @@
 import json
+import os
 import socket
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import yaml
@@ -27,7 +29,11 @@ class Gripper:
         port = None
         timeout = None
         try:
-            with open("rby1-data-collection/config.yaml", encoding="utf-8") as f:
+            config_path = os.getenv(
+                "RBY1_CONFIG_PATH",
+                str(Path(__file__).resolve().parent / "config.yaml"),
+            )
+            with open(config_path, encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
                 host = cfg.get("remote_gripper_host", None)
                 port = cfg.get("remote_gripper_port", None)

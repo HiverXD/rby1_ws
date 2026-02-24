@@ -15,7 +15,7 @@ user_name : "edipark" # Hugging Face 데이터 push를 위한 user name
 
 # connection 
 user_pc_ip: "192.168.0.50:50051" # user pc
-metaquest_ip: "192.168.0.36" # metaquest
+metaquest_ip: "192.168.0.39" # metaquest
 local_ip: "192.168.0.27" # 실제 이 컴퓨터 ip (migrated. user pc 아님)
 # local_ip: "192.168.0.39" # user pc에서 실행할 때
 
