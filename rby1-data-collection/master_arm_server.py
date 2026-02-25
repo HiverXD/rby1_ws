@@ -101,6 +101,11 @@ class MasterArmServer:
         self._homing_max_speed    = np.deg2rad(30.0)  # rad/sec (기본 30 deg/sec)
         self._homing_done         = threading.Event()
 
+        # gravity 모드 hold 위치 (SDK 예시 패턴: 버튼 OFF → 위치 유지)
+        # 잠금 해제 버튼이 눌리지 않을 때 팔을 고정할 관절 위치 (7 DOF each)
+        self._hold_q_right = np.zeros(7, dtype=float)
+        self._hold_q_left  = np.zeros(7, dtype=float)
+
         self._master_arm = None
         self._running    = False
 
@@ -216,11 +221,42 @@ class MasterArmServer:
             inp.target_torque[:] = hold_torque
             inp.target_position[:] = hold_pos
 
-        else:  # "gravity" or "idle"
-            inp.target_operating_mode.fill(rby.DynamixelBus.CurrentControlMode)
+        else:  # "gravity"
+            # SDK C++ 예시(master_arm.cpp) 패턴: 팔별로 unlock 버튼에 따라 독립 제어
+            #   버튼 누름(unlock=1): CurrentControlMode + gravity_term*gain  → 팔이 자유롭게 뜸
+            #   버튼 OFF (unlock=0): CurrentBasedPositionControlMode + 마지막 위치 → 팔 고정
             with self._lock:
                 gain = self._gravity_gain
-            inp.target_torque = grav * gain
+
+            # ── 오른팔 (joints 0–6) ─────────────────────────────
+            if r_unlock:
+                inp.target_operating_mode[:7].fill(rby.DynamixelBus.CurrentControlMode)
+                inp.target_torque[:7] = grav[:7] * gain
+                with self._lock:
+                    self._hold_q_right = q[:7].copy()   # 버튼 누르는 동안 계속 갱신
+            else:
+                inp.target_operating_mode[:7].fill(
+                    rby.DynamixelBus.CurrentBasedPositionControlMode
+                )
+                with self._lock:
+                    hold_r = self._hold_q_right.copy()
+                inp.target_position[:7] = hold_r
+                inp.target_torque[:7]   = self._homing_torque[:7]
+
+            # ── 왼팔 (joints 7–13) ─────────────────────────────
+            if l_unlock:
+                inp.target_operating_mode[7:].fill(rby.DynamixelBus.CurrentControlMode)
+                inp.target_torque[7:] = grav[7:] * gain
+                with self._lock:
+                    self._hold_q_left = q[7:].copy()    # 버튼 누르는 동안 계속 갱신
+            else:
+                inp.target_operating_mode[7:].fill(
+                    rby.DynamixelBus.CurrentBasedPositionControlMode
+                )
+                with self._lock:
+                    hold_l = self._hold_q_left.copy()
+                inp.target_position[7:] = hold_l
+                inp.target_torque[7:]   = self._homing_torque[7:]
 
         return inp
 
@@ -328,8 +364,12 @@ class MasterArmServer:
 
         elif cmd == "start_gravity":
             with self._lock:
+                # gravity 모드 진입 시 현재 관절 위치를 hold 기준으로 초기화
+                # (버튼을 처음 누르기 전까지 이 위치를 유지)
+                self._hold_q_right = self._q[:7].copy()
+                self._hold_q_left  = self._q[7:].copy()
                 self._mode = "gravity"
-            logger.info(f"[{addr[0]}] 중력 보상 모드 시작")
+            logger.info(f"[{addr[0]}] 중력 보상 모드 시작 (per-arm deadman switch 활성화)")
             return {"ok": True, "cmd": "start_gravity"}
 
         elif cmd == "stop":
