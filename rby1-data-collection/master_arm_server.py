@@ -53,9 +53,10 @@ DEFAULT_URDF       = os.path.join(
     os.path.dirname(os.path.realpath(__file__)),
     "../rby1-sdk/models/master_arm/model.urdf",
 )
-DEFAULT_STATE_PORT = 5010   # 서버→클라이언트 상태 스트리밍 포트
-DEFAULT_CMD_PORT   = 5011   # 클라이언트→서버 명령 수신 포트
-DEFAULT_CONTROL_DT = 0.01   # 100 Hz
+DEFAULT_STATE_PORT  = 5010   # 서버→클라이언트 상태 스트리밍 포트
+DEFAULT_CMD_PORT    = 5011   # 클라이언트→서버 명령 수신 포트
+DEFAULT_CONTROL_DT  = 0.01   # 100 Hz
+DEFAULT_GRAVITY_GAIN = 1.3   # 중력 보상 배율 (1.0 = 원본, >1 = 강하게)
 
 
 # ══════════════════════════════════════════════════════════
@@ -71,13 +72,15 @@ class MasterArmServer:
         cmd_port: int = DEFAULT_CMD_PORT,
         client_host: Optional[str] = None,  # None = broadcast
         control_dt: float = DEFAULT_CONTROL_DT,
+        gravity_gain: float = DEFAULT_GRAVITY_GAIN,
     ):
-        self.device      = device
-        self.urdf_path   = os.path.abspath(urdf_path)
-        self.state_port  = state_port
-        self.cmd_port    = cmd_port
-        self.client_host = client_host
-        self.control_dt  = control_dt
+        self.device       = device
+        self.urdf_path    = os.path.abspath(urdf_path)
+        self.state_port   = state_port
+        self.cmd_port     = cmd_port
+        self.client_host  = client_host
+        self.control_dt   = control_dt
+        self._gravity_gain = float(gravity_gain)  # 중력 보상 배율
 
         # 상태
         self._lock         = threading.Lock()
@@ -207,7 +210,9 @@ class MasterArmServer:
 
         else:  # "gravity" or "idle"
             inp.target_operating_mode.fill(rby.DynamixelBus.CurrentControlMode)
-            inp.target_torque = grav
+            with self._lock:
+                gain = self._gravity_gain
+            inp.target_torque = grav * gain
 
         return inp
 
@@ -347,6 +352,19 @@ class MasterArmServer:
             reached = self._homing_done.wait(timeout=timeout)
             return {"ok": True, "cmd": "homing_wait", "reached": reached}
 
+        elif cmd == "set_gravity_gain":
+            gain = float(msg.get("gain", DEFAULT_GRAVITY_GAIN))
+            gain = float(np.clip(gain, 0.5, 3.0))  # 안전 범위 제한
+            with self._lock:
+                self._gravity_gain = gain
+            logger.info(f"[{addr[0]}] gravity_gain → {gain:.2f}")
+            return {"ok": True, "cmd": "set_gravity_gain", "gain": gain}
+
+        elif cmd == "get_gravity_gain":
+            with self._lock:
+                gain = self._gravity_gain
+            return {"ok": True, "cmd": "get_gravity_gain", "gain": gain}
+
         else:
             logger.warning(f"알 수 없는 명령: {cmd}")
             return {"ok": False, "cmd": cmd, "error": "unknown command"}
@@ -420,15 +438,18 @@ def main():
     parser.add_argument("--cmd-port",     type=int, default=DEFAULT_CMD_PORT,   help="명령 수신 포트")
     parser.add_argument("--client-host",  default=None, help="Remote PC IP (지정하면 unicast)")
     parser.add_argument("--control-dt",   type=float, default=DEFAULT_CONTROL_DT, help="제어 주기 (초)")
+    parser.add_argument("--gravity-gain", type=float, default=DEFAULT_GRAVITY_GAIN,
+                        help=f"중력 보상 배율 (기본 {DEFAULT_GRAVITY_GAIN}, 범위 0.5~3.0)")
     args = parser.parse_args()
 
     server = MasterArmServer(
-        device      = args.device,
-        urdf_path   = args.urdf,
-        state_port  = args.state_port,
-        cmd_port    = args.cmd_port,
-        client_host = args.client_host,
-        control_dt  = args.control_dt,
+        device       = args.device,
+        urdf_path    = args.urdf,
+        state_port   = args.state_port,
+        cmd_port     = args.cmd_port,
+        client_host  = args.client_host,
+        control_dt   = args.control_dt,
+        gravity_gain = args.gravity_gain,
     )
 
     def _sig(signum, frame):

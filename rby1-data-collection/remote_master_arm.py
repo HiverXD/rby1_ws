@@ -157,6 +157,28 @@ class RemoteMasterArm:
         resp = self._send_cmd({"cmd": "start_gravity"})
         return bool(resp and resp.get("ok", False))
 
+    def set_gravity_gain(self, gain: float) -> float:
+        """
+        중력 보상 배율을 실시간으로 변경합니다.
+
+        Args:
+            gain: 배율 (서버 측 클램프: 0.5 ~ 3.0).
+                  1.0 = 원본 그대로, 1.3 = 30% 강화 (기본값)
+        Returns:
+            서버가 실제로 적용한 gain 값 (클램프 후).
+        """
+        resp = self._send_cmd({"cmd": "set_gravity_gain", "gain": float(gain)})
+        if resp and resp.get("ok"):
+            return float(resp.get("gain", gain))
+        return float(gain)
+
+    def get_gravity_gain(self) -> Optional[float]:
+        """현재 서버의 gravity_gain 값을 조회합니다."""
+        resp = self._send_cmd({"cmd": "get_gravity_gain"})
+        if resp and resp.get("ok"):
+            return float(resp.get("gain", 1.0))
+        return None
+
     def stop(self) -> bool:
         """서버에 제어 루프 정지를 요청합니다."""
         resp = self._send_cmd({"cmd": "stop"})
