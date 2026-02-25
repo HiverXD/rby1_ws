@@ -65,6 +65,7 @@ class MultiRealsense:
         ctx = rs.context()
         devices = ctx.query_devices()
         available_serials = {dev.get_info(rs.camera_info.serial_number) for dev in devices}
+        logging.info(f"연결된 RealSense 장치 ({len(available_serials)}개): {sorted(available_serials)}")
 
         for serial in self.serials:
             if serial in available_serials:
@@ -81,7 +82,10 @@ class MultiRealsense:
                 self.buffers[serial] = deque(maxlen=self.buffer_size)
                 logging.info(f"Camera {serial} configured.")
             else:
-                logging.warning(f"Camera with serial {serial} not found.")
+                logging.warning(
+                    f"Camera {serial} NOT FOUND — USB 연결 확인 필요. "
+                    f"감지된 장치: {sorted(available_serials)}"
+                )
 
     def enable_filters_for_serial(self, serial: str):
         """
@@ -108,6 +112,22 @@ class MultiRealsense:
             'temporal': temporal
         }
 
+    def _make_pipeline_and_config(self, serial: str):
+        """새 rs.context/pipeline/config/align 을 생성하여 해당 시리얼에 등록합니다.
+        
+        실패한 pipeline.start() 이후 UVC 장치가 반쯤 열린 상태(half-open)로 남는
+        LibRealSense 버그를 우회하기 위해 재시도마다 새 객체를 씁니다.
+        """
+        ctx = rs.context()
+        pipe = rs.pipeline(ctx)
+        cfg = rs.config()
+        cfg.enable_device(serial)
+        cfg.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
+        cfg.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
+        self.pipelines[serial] = pipe
+        self.configs[serial] = cfg
+        self.aligns[serial] = rs.align(rs.stream.color)
+
     def start(self):
         if not self.pipelines:
             logging.error("No cameras configured. Cannot start.")
@@ -128,18 +148,56 @@ class MultiRealsense:
 
                     logging.info(f"Pipeline started for camera {serial}")
                     started_serials.append(serial)
+                    time.sleep(1.0)  # USB 대역폭 안정화 — 다음 카메라 시작 전 대기
                     break
                 except Exception as e:
                     retry_count += 1
+                    err_msg = str(e)
+
+                    # ── 실패 직후 장치 핸들 해제 ───────────────────────
+                    # pipeline.start()가 중간에 실패하면 UVC 장치가 half-open 상태로
+                    # 남아 재시도 시 "already opened" 오류가 발생합니다.
+                    # pipeline.stop()으로 핸들을 먼저 해제한 뒤 새 객체를 생성합니다.
+                    try:
+                        self.pipelines[serial].stop()
+                    except Exception:
+                        pass
+                    time.sleep(2.0)
+
                     if retry_count < max_retries:
-                        logging.warning(f"Failed to start pipeline for camera {serial} (attempt {retry_count}/{max_retries}): {e}")
-                        time.sleep(2)  # Wait before retry
+                        logging.warning(
+                            f"Failed to start pipeline for camera {serial} "
+                            f"(attempt {retry_count}/{max_retries}): {err_msg}"
+                        )
+                        # 마지막 재시도 전: 하드웨어 리셋으로 UVC 상태 초기화
+                        if retry_count == max_retries - 1:
+                            try:
+                                ctx_tmp = rs.context()
+                                for dev in ctx_tmp.query_devices():
+                                    if dev.get_info(rs.camera_info.serial_number) == serial:
+                                        logging.warning(f"[{serial}] 하드웨어 리셋 시도...")
+                                        dev.hardware_reset()
+                                        time.sleep(4.0)  # 리셋 후 USB 재열거 대기
+                                        break
+                            except Exception as hw_e:
+                                logging.warning(f"[{serial}] 하드웨어 리셋 실패 (무시): {hw_e}")
+                        # 새 pipeline/config 객체 생성 (half-open 객체 버림)
+                        self._make_pipeline_and_config(serial)
                     else:
-                        logging.error(f"Failed to start pipeline for camera {serial} after {max_retries} attempts: {e}")
+                        logging.error(
+                            f"Failed to start pipeline for camera {serial} "
+                            f"after {max_retries} attempts: {err_msg} (type={type(e).__name__})"
+                        )
         
         if not started_serials:
             logging.error("No cameras could be started.")
             return
+
+        # 시작 실패한 카메라는 buffers에서 제거 (sync 루프가 영구 blocked 되는 버그 방지)
+        failed_serials = [s for s in list(self.buffers.keys()) if s not in started_serials]
+        for serial in failed_serials:
+            logging.warning(f"Camera {serial} failed to start — removing from sync loop")
+            self.buffers.pop(serial, None)
 
         self.running = True
 
@@ -293,11 +351,12 @@ class MultiRealsense:
         """
         tol_s = self.sync_tolerance_ms / 1000.0
 
-        # 기준 카메라(첫 번째)를 레퍼런스로 사용
-        ref_serial = self.serials[0] if self.serials else None
-        if ref_serial is None or ref_serial not in self.buffers:
-            logging.error("No reference camera available for sync.")
+        # 기준 카메라 — 실제로 시작된(buffers에 있는) 첫 번째 카메라 사용
+        ref_serial = next(iter(self.buffers), None)
+        if ref_serial is None:
+            logging.error("No cameras started — sync loop exiting.")
             return
+        logging.info(f"Sync reference camera: {ref_serial}")
 
         while self.running:
             with self.lock:

@@ -86,7 +86,7 @@ class MasterArmServer:
         self._btn_right    = 0
         self._btn_left     = 0
         self._ts           = 0.0
-        self._mode         = "gravity"   # "gravity" | "homing" | "idle"
+        self._mode         = "gravity"   # "gravity" | "homing" | "hold" | "idle"
 
         # homing 목표
         self._homing_target       = np.zeros(14, dtype=float)
@@ -166,12 +166,18 @@ class MasterArmServer:
             max_err = float(np.max(np.abs(q - target)))
             if max_err < thresh:
                 with self._lock:
-                    self._mode = "gravity"
+                    self._mode = "hold"  # gravity 아닌 hold 모드로 전환
                 self._homing_done.set()
-                logger.info(f"[Homing] 완료 — 최대 오차: {np.rad2deg(max_err):.2f}°")
-                # Phase 2: 중력 보상으로 전환
-                inp.target_operating_mode.fill(rby.DynamixelBus.CurrentControlMode)
-                inp.target_torque = grav
+                logger.info(
+                    f"[Homing] 완료 → 위치 유지(hold) 모드. 최대 오차: {np.rad2deg(max_err):.2f}°\n"
+                    f"  start_gravity() 호출(Step 6) 전까지 목표 자세를 능동 유지합니다."
+                )
+                # 수렴 직후 한 스텝도 목표 위치를 능동 유지
+                inp.target_operating_mode.fill(
+                    rby.DynamixelBus.CurrentBasedPositionControlMode
+                )
+                inp.target_torque[:] = torque
+                inp.target_position[:] = target
             else:
                 # 보간 목표를 max_speed에 맞게 한 스텝씩 전진
                 max_step = max_speed * self.control_dt
@@ -186,6 +192,18 @@ class MasterArmServer:
                 )
                 inp.target_torque[:]   = torque
                 inp.target_position[:] = interp_target
+
+        elif mode == "hold":
+            # homing 완료 후 목표 자세를 위치 제어로 능동 유지
+            # start_gravity() 호출(Step 6) 시 gravity 모드로 전환됨
+            with self._lock:
+                hold_pos    = self._homing_target.copy()
+                hold_torque = self._homing_torque.copy()
+            inp.target_operating_mode.fill(
+                rby.DynamixelBus.CurrentBasedPositionControlMode
+            )
+            inp.target_torque[:] = hold_torque
+            inp.target_position[:] = hold_pos
 
         else:  # "gravity" or "idle"
             inp.target_operating_mode.fill(rby.DynamixelBus.CurrentControlMode)
