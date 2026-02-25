@@ -40,9 +40,9 @@ class Settings:
 
 READY_POSE = {
     "A": Pose(
-        toros=np.deg2rad([0.0, 45.0, -90.0, 45.0, 0.0, 0.0]),
-        right_arm=np.deg2rad([0.0, -5.0, 0.0, -120.0, 0.0, 70.0, 0.0]),
-        left_arm=np.deg2rad([0.0, 5.0, 0.0, -120.0, 0.0, 70.0, 0.0]),
+        toros=np.deg2rad([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        right_arm=np.deg2rad([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        left_arm=np.deg2rad([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
     ),
     "T5": Pose(
         toros=np.deg2rad([45.0, -90.0, 45.0, 0.0, 0.0]),
