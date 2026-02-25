@@ -221,6 +221,16 @@ class MasterArmServer:
             inp.target_torque[:] = hold_torque
             inp.target_position[:] = hold_pos
 
+        elif mode == "idle":
+            # 정지 모드: unlock 버튼 상태에 관계없이 모든 관절을
+            # 현재 위치에서 균일하게 위치 제어로 고정
+            # (일부 관절만 풀리는 불일치 현상 방지)
+            inp.target_operating_mode.fill(
+                rby.DynamixelBus.CurrentBasedPositionControlMode
+            )
+            inp.target_torque[:] = self._homing_torque
+            inp.target_position[:] = q   # 현재 관절 위치를 목표로 설정
+
         else:  # "gravity"
             # SDK C++ 예시(master_arm.cpp) 패턴: 팔별로 unlock 버튼에 따라 독립 제어
             #   버튼 누름(unlock=1): CurrentControlMode + gravity_term*gain  → 팔이 자유롭게 뜸
