@@ -168,10 +168,15 @@ class RemoteMasterArm:
         target_left_deg: list,
         torque_limit: Optional[list] = None,
         threshold_deg: float = 5.0,
+        max_speed_deg_per_sec: Optional[float] = None,
     ) -> bool:
         """
         서버에 homing 명령을 전송합니다 (비동기 — 서버가 백그라운드에서 실행).
         완료를 기다리려면 wait_homing() 을 사용하세요.
+
+        Args:
+            max_speed_deg_per_sec: 각 관절의 최대 이동 속도 (deg/sec).
+                                   None이면 서버 기본값(30 deg/sec)을 사용합니다.
         """
         payload: dict = {
             "cmd":           "homing",
@@ -181,6 +186,8 @@ class RemoteMasterArm:
         }
         if torque_limit is not None:
             payload["torque_limit"] = list(torque_limit)
+        if max_speed_deg_per_sec is not None:
+            payload["max_speed_deg_per_sec"] = float(max_speed_deg_per_sec)
         resp = self._send_cmd(payload)
         return bool(resp and resp.get("ok", False))
 

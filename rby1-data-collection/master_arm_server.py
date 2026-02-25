@@ -89,10 +89,12 @@ class MasterArmServer:
         self._mode         = "gravity"   # "gravity" | "homing" | "idle"
 
         # homing 목표
-        self._homing_target  = np.zeros(14, dtype=float)
-        self._homing_torque  = np.array([3.5, 3.5, 3.5, 1.5, 1.5, 1.5, 1.5] * 2)
-        self._homing_thresh  = np.deg2rad(5.0)
-        self._homing_done    = threading.Event()
+        self._homing_target       = np.zeros(14, dtype=float)
+        self._homing_interp_target = np.zeros(14, dtype=float)  # 보간 중간 목표
+        self._homing_torque       = np.array([3.5, 3.5, 3.5, 1.5, 1.5, 1.5, 1.5] * 2)
+        self._homing_thresh       = np.deg2rad(5.0)
+        self._homing_max_speed    = np.deg2rad(30.0)  # rad/sec (기본 30 deg/sec)
+        self._homing_done         = threading.Event()
 
         self._master_arm = None
         self._running    = False
@@ -156,9 +158,10 @@ class MasterArmServer:
 
         if mode == "homing":
             with self._lock:
-                target = self._homing_target.copy()
-                torque = self._homing_torque.copy()
-                thresh = self._homing_thresh
+                target    = self._homing_target.copy()
+                torque    = self._homing_torque.copy()
+                thresh    = self._homing_thresh
+                max_speed = self._homing_max_speed
 
             max_err = float(np.max(np.abs(q - target)))
             if max_err < thresh:
@@ -170,11 +173,19 @@ class MasterArmServer:
                 inp.target_operating_mode.fill(rby.DynamixelBus.CurrentControlMode)
                 inp.target_torque = grav
             else:
+                # 보간 목표를 max_speed에 맞게 한 스텝씩 전진
+                max_step = max_speed * self.control_dt
+                with self._lock:
+                    remaining = target - self._homing_interp_target
+                    step = np.clip(remaining, -max_step, max_step)
+                    self._homing_interp_target += step
+                    interp_target = self._homing_interp_target.copy()
+
                 inp.target_operating_mode.fill(
                     rby.DynamixelBus.CurrentBasedPositionControlMode
                 )
                 inp.target_torque[:]   = torque
-                inp.target_position[:] = target
+                inp.target_position[:] = interp_target
 
         else:  # "gravity" or "idle"
             inp.target_operating_mode.fill(rby.DynamixelBus.CurrentControlMode)
@@ -294,15 +305,18 @@ class MasterArmServer:
                                                np.rad2deg(self._homing_target[:7]).tolist()))
             target_left  = np.deg2rad(msg.get("target_left",
                                                np.rad2deg(self._homing_target[7:]).tolist()))
-            torque_limit = msg.get("torque_limit", None)
-            thresh_deg   = float(msg.get("threshold_deg", 5.0))
+            torque_limit          = msg.get("torque_limit", None)
+            thresh_deg            = float(msg.get("threshold_deg", 5.0))
+            max_speed_deg_per_sec = float(msg.get("max_speed_deg_per_sec", 30.0))
 
             with self._lock:
-                self._homing_target = np.concatenate([target_right, target_left])
+                self._homing_target        = np.concatenate([target_right, target_left])
+                self._homing_interp_target = self._q.copy()  # 현재 위치에서 출발
                 if torque_limit is not None:
                     self._homing_torque = np.array(torque_limit, dtype=float)
-                self._homing_thresh = np.deg2rad(thresh_deg)
-                self._mode          = "homing"
+                self._homing_thresh     = np.deg2rad(thresh_deg)
+                self._homing_max_speed  = np.deg2rad(max_speed_deg_per_sec)
+                self._mode              = "homing"
             self._homing_done.clear()
             logger.info(
                 f"[{addr[0]}] Homing 시작 — 목표 오른팔: "
