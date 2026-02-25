@@ -1,14 +1,14 @@
 # demo collection
-task_name: "PuttingCupintotheDish" # 데모 저장 디렉토리를 지정하기 위한 config
+task_name: "PuttingCupintotheDishV2" # 데모 저장 디렉토리를 지정하기 위한 config
 # demo_root: '/media/nvidia/T7/Demo/' # ssh로 user pc에서 했을 때
 demo_root: '/media/hyunjin/T7/rby1_demo/' # 직접 이 컴퓨터에서 했을 때
 
 # dataset config
-FPS: 10
+rec_fps: 15  # recording FPS for demo logger thread
 
 # dataset conversion
 dataset_saving_root: "/home/hyunjin/RBY1_migration/lerobot/custom_lerobot_dataset"
-conversion_task_name: "PuttingCupintotheDish" # "PuttingCupintotheDish" # 어떤 task의 데모를 변환할 것인지 지정하기 위한 config
+conversion_task_name: "PuttingCupintotheDishV2" # "PuttingCupintotheDish" # 어떤 task의 데모를 변환할 것인지 지정하기 위한 config
 # 이제 변환된 데이터셋은 RBY1_migration/lerobot에 저장됩니다. 
 
 user_name : "edipark" # Hugging Face 데이터 push를 위한 user name
@@ -23,6 +23,11 @@ remote_gripper_host: "192.168.0.56"
 remote_gripper_port: 5009
 remote_gripper_timeout: 30
 
+# Master Arm 서버 (master_arm_server.py 가 실행되는 Robot PC)
+remote_master_arm_host: "192.168.0.56"   # Robot PC IP
+remote_master_arm_state_port: 5010       # 서버→클라이언트 상태 스트리밍
+remote_master_arm_cmd_port: 5011         # 클라이언트→서버 명령
+
 # Elbow angle threshold for starting condition
 elbow_angle_threshold_deg: 90
 
@@ -32,16 +37,16 @@ cameras:
     serial: "922612070040"
     color: "/camera/camera/color/image_raw"
     depth: "/camera/camera/depth/image_rect_raw"
-  # right:
-  #   namespace: "camera2"
-  #   serial: "838212074317"
-  #   color: "/camera2/camera/color/image_raw"
-  #   depth: "/camera2/camera/depth/image_rect_raw"
-  # left:
-  #   namespace: "camera2"
-  #   serial: "838212070714"
-  #   color: "/camera2/camera/color/image_raw"
-  #   depth: "/camera2/camera/depth/image_rect_raw"
+  right:
+    namespace: "camera2"
+    serial: "838212074317"
+    color: "/camera2/camera/color/image_raw"
+    depth: "/camera2/camera/depth/image_rect_raw"
+  left:
+    namespace: "camera3"
+    serial: "838212070714"
+    color: "/camera3/camera/color/image_raw"
+    depth: "/camera3/camera/depth/image_rect_raw"
 
 cam_node_num: 3
 

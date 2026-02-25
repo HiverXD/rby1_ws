@@ -97,7 +97,8 @@ class H5Writer:
 
         # camera datasets for all groups (head, right_wrist, left_wrist)
 
-        with open('rby1-data-collection/config.yaml', encoding='utf-8') as f:
+        _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.yaml')
+        with open(_config_path, encoding='utf-8') as f:
             config = yaml.safe_load(f)
         cams = config.get("cameras", {})
         if cams is None:
@@ -260,6 +261,9 @@ class H5Writer:
                                 d_cam_data[cam]['depth_img'] = None
                                 continue
 
+                # snapshot of idx before any appends in this batch cycle (used for sample_index alignment)
+                batch_start_idx = idx
+
                 # ----- Append kinematics / gripper -----
                 if batch and d_time is not None:
                     ts_list, rp_list, rtc_list, rtj_list = [], [], [], []
@@ -380,7 +384,7 @@ class H5Writer:
                                         continue
                                     cam_imgs.append(img.astype(np.uint8, copy=False))
                                     cam_times.append(float(s.get(key_rgb_ts, s["ts"])))
-                                    cam_sample_indices.append(idx + local_i)
+                                    cam_sample_indices.append(batch_start_idx + local_i)
                                 except Exception as e:
                                     logging.warning(f"[h5_writer] Failed to process {key_rgb}: {e}")
                                     continue
@@ -424,7 +428,7 @@ class H5Writer:
                                         continue
                                     depth_imgs.append(depth.astype(np.uint16, copy=False))
                                     depth_times.append(float(s.get(key_depth_ts, s["ts"])))
-                                    depth_sample_indices.append(idx + local_i)
+                                    depth_sample_indices.append(batch_start_idx + local_i)
                                 except Exception as e:
                                     logging.warning(f"[h5_writer] Failed to process {key_depth}: {e}")
                                     continue
@@ -459,7 +463,7 @@ class H5Writer:
                         if s.get("pcd_points") is not None and s.get("pcd_colors") is not None:
                             points = np.asarray(s["pcd_points"])
                             colors = np.asarray(s["pcd_colors"])
-                            ts = float(s.get("head_depth_ts", s.get("head_rgb_ts", s["ts"])))
+                            ts = float(s["ts"])  # sample_ts is already camera-aligned (= frame_stamp) in main.py
                             
                             # Lazy create PCD datasets
                             if d_pcd_points is None:

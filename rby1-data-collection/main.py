@@ -8,22 +8,19 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R, Slerp
 from remote_gripper import Gripper
 import pickle
-
-# demo writer 
-from h5py_writer_cam import H5Writer
-
-import numpy as np
-import time
 import yaml
+import os
+
+# demo writer
+from h5py_writer_cam import H5Writer
+from pcd_utils import rgbd_to_pointcloud, REALSENSE_D435_INTRINSICS, REALSENSE_D435_INTRINSICS_848x480
 
 from utils import *
-
-import threading
-from helper import * 
+from helper import *
 
 from camera import MultiRealsense
 from setup import Settings, SystemContext
-from robot_communicate import robot_state_callback, connect_rby1
+from robot_communicate import connect_rby1
 from vr_communicate import setup_meta_quest_udp_communication, handle_vr_button_event
 
 
@@ -52,22 +49,12 @@ def pose_to_se3(position, rotation_quat):
     return T
 
 
-def average_so3_slerp(R1: np.ndarray, R2: np.ndarray) -> np.ndarray:
-    # 두 회전을 Rotation 객체로 변환
-    rot1 = R.from_matrix(R1)
-    rot2 = R.from_matrix(R2)
-
-    # 보간 설정: t=0 => rot1, t=1 => rot2
-    slerp = Slerp([0, 1], R.concatenate([rot1, rot2]))
-
-    # 평균값은 중간지점 t=0.5
-    rot_avg = slerp(0.5)
-    return rot_avg.as_matrix()
-
-
 def publish_gv(sock: zmq.Socket):
     while True:
-        sock.send(pickle.dumps(SystemContext.vr_state))
+        try:
+            sock.send(pickle.dumps(SystemContext.vr_state))
+        except Exception as e:
+            logging.warning(f"[publish_gv] Failed to publish state: {e}")
         time.sleep(0.1)
 
 def get_config():
@@ -91,9 +78,6 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
     dyn_robot = robot.get_dynamics()
     robot_model = robot.model()
 
-    # Import PCD utilities
-    from pcd_utils import rgbd_to_pointcloud, REALSENSE_D435_INTRINSICS, REALSENSE_D435_INTRINSICS_848x480
-
     config = get_config()
     # Get camera configuration from the config file
     cameras_config = config.get('cameras', {})
@@ -116,9 +100,6 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
     realsense = realsense_obj if isinstance(realsense_obj, MultiRealsense) else None
     if realsense is None or not getattr(realsense, "running", False):
         realsense = MultiRealsense(camera_serials=camera_serials, width=img_size['width'], height=img_size['height'])
-        for cam_id, spec in cameras_config.items():
-            serial = spec['serial']
-
         realsense.start()
 
         # Store realsense object in SystemContext for access from other threads
@@ -257,7 +238,19 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
             except Exception as e:
                 logging.warning(f"[demo_logger] Failed to read robot position: {e}")
             
-            robot_target_joints = robot_pos
+            # Skip this step if robot position is unavailable
+            if robot_pos is None:
+                next_t += period
+                sleep_for = next_t - time.perf_counter()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                else:
+                    next_t = time.perf_counter()
+                continue
+
+            # robot_target_joints initially equals current position;
+            # update_previous_target() will overwrite step t-1 with robot_pos[t] on the next iteration.
+            robot_target_joints = robot_pos.copy()
 
             # Gripper encoders (actual measured state)
             grip = None
@@ -348,7 +341,7 @@ def start_demo_logger(gripper: Gripper | None, h5_writer, robot, fps: int = 30) 
                     "robot_position": robot_pos,
                     "robot_target_joints": robot_target_joints,
                     "gripper_state": grip,
-                    "gripper_target": gripper.get_normalized_target() if gripper else None,
+                    "gripper_target": gripper.get_target().copy() if gripper else None,
                     "base_state" : base_state,
                     "pcd_points": pcd_points,
                     "pcd_colors": pcd_colors
@@ -502,22 +495,27 @@ def main(args: argparse.Namespace):
             continue
         button_event, torso_mode = handle_vr_button_event(robot, args.no_head)
 
-        # Handle new recording request
-        if SystemContext.start_new_recording_requested:
+        # Handle new recording request (lock for thread-safe read-and-clear)
+        with SystemContext.recording_lock:
+            _new_recording = SystemContext.start_new_recording_requested
+            if _new_recording:
+                SystemContext.start_new_recording_requested = False
+
+        if _new_recording:
             logging.info("Handling new recording request")
-            SystemContext.start_new_recording_requested = False
-            
+
             # Create new H5 file path and writer
             output_path = get_next_h5_path(root_path)
             h5_writer = H5Writer(path=output_path, flush_every=60, flush_secs=1.0).start()
-            
+
             # Start new demo logger
             rec_data = start_demo_logger(gripper, h5_writer, robot, fps=Settings.rec_fps)
-            
-            # Update SystemContext
-            SystemContext.h5_writer = h5_writer
-            SystemContext.rec_stop_event = rec_data
-            
+
+            # Update SystemContext under lock so button handler sees consistent state
+            with SystemContext.recording_lock:
+                SystemContext.h5_writer = h5_writer
+                SystemContext.rec_stop_event = rec_data
+
             logging.info(f"New recording started: {output_path}")
         
         if button_event:
@@ -832,7 +830,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--rby1", default=user_pc_ip, type=str,
-        help=f"gRPC address of the RB-Y1 robot (default: {user_pc_ip})"
+        help=f"RPC address of the RB-Y1 robot (default: {user_pc_ip})"
     )
     parser.add_argument(
         "--rby1_model", default="a", type=str,

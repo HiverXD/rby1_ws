@@ -2,10 +2,17 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Union, Optional, Any
 import threading
+import os
+import yaml
 import rby1_sdk as rby
-from h5py_writer import H5Writer
 from vr_control_state import VRControlState
-# from lerobot_handler import LeRobotDataHandler
+
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.yaml')
+try:
+    with open(_CONFIG_PATH, encoding='utf-8') as _f:
+        _config = yaml.safe_load(_f) or {}
+except Exception:
+    _config = {}
 
 class Settings:
     dt: float = 0.1
@@ -22,7 +29,7 @@ class Settings:
     mobile_linear_damping_gain: float = 0.3
     mobile_angular_damping_gain: float = 0.3
 
-    rec_fps: int = 10
+    rec_fps: int = _config.get('rec_fps', 15)
 
     MAX_POINT: int = None
 
@@ -58,6 +65,9 @@ class SystemContext:
     realsense: Optional[object] = None
     camera_warmup_done: bool = False
     
+    # Lock for thread-safe recording state transitions
+    # (protects demo_recording_status and start_new_recording_requested shared between main loop and VR button handler)
+    recording_lock: threading.Lock = threading.Lock()
     # Demo recording state management
     demo_recording_status: str = "idle"  # "idle", "recording", "stopping"
     start_new_recording_requested: bool = False  # Flag to request starting a new recording in main loop

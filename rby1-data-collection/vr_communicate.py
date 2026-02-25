@@ -182,13 +182,13 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
 
     elif SystemContext.vr_state.event_right_b_pressed:
         logging.info("Right B button pressed. Stopping and saving recording.")
-        # Stop the demo logger (signal its stop event) and flush/close the H5 file
-        try:
+        # Atomically update recording status before stopping
+        with SystemContext.recording_lock:
+            SystemContext.demo_recording_status = "idle"
+
             if SystemContext.rec_stop_event is not None:
                 SystemContext.rec_stop_event.set()
                 logging.info("Signaled demo logger to stop")
-        except Exception as e:
-            logging.warning(f"Failed to signal demo logger: {e}")
 
         try:
             if SystemContext.h5_writer is not None:
@@ -206,22 +206,38 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
             logging.debug(f"X button debounced (interval: {current_time - last_x_button_time:.3f}s < {X_BUTTON_DEBOUNCE_TIME}s)")
         else:
             last_x_button_time = current_time
-            logging.info(f"Left X button pressed. Current demo recording status: {SystemContext.demo_recording_status}")
-            
-            if SystemContext.demo_recording_status == "idle":
-                # First press: Start recording
-                logging.info("Starting demo recording")
-                SystemContext.demo_recording_status = "recording"
-                SystemContext.start_new_recording_requested = True
-                SystemContext.vr_state.is_initialized = True
-                SystemContext.vr_state.is_stopped = False
-                
-            elif SystemContext.demo_recording_status == "recording":
-                # Second press: Stop recording
-                logging.info("Stopping demo recording")
-                SystemContext.demo_recording_status = "stopping"
-                
-                # Stop the demo logger and H5 writer
+            _stop_rec_event = False
+            _stop_h5_writer = False
+
+            with SystemContext.recording_lock:
+                logging.info(f"Left X button pressed. Current demo recording status: {SystemContext.demo_recording_status}")
+
+                if SystemContext.demo_recording_status == "idle":
+                    # First press: Start recording
+                    logging.info("Starting demo recording")
+                    SystemContext.demo_recording_status = "recording"
+                    SystemContext.start_new_recording_requested = True
+                    SystemContext.vr_state.is_initialized = True
+                    SystemContext.vr_state.is_stopped = False
+
+                elif SystemContext.demo_recording_status == "recording":
+                    # Second press: Stop recording
+                    logging.info("Stopping demo recording")
+                    SystemContext.demo_recording_status = "stopping"
+                    _stop_rec_event = True
+                    _stop_h5_writer = True
+                    SystemContext.vr_state.is_stopped = True
+
+                elif SystemContext.demo_recording_status == "stopping":
+                    # Third press: Start new recording
+                    logging.info("Starting new demo recording")
+                    SystemContext.demo_recording_status = "recording"
+                    SystemContext.start_new_recording_requested = True
+                    SystemContext.vr_state.is_initialized = True
+                    SystemContext.vr_state.is_stopped = False
+
+            # Perform blocking stop operations outside the lock to avoid deadlock
+            if _stop_rec_event:
                 try:
                     if SystemContext.rec_stop_event is not None:
                         SystemContext.rec_stop_event.set()
@@ -229,26 +245,17 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
                 except Exception as e:
                     logging.warning(f"Failed to signal demo logger: {e}")
 
+            if _stop_h5_writer:
                 try:
                     if SystemContext.h5_writer is not None:
                         SystemContext.h5_writer.stop()
                         logging.info("H5 writer stopped and file saved")
                 except Exception as e:
                     logging.warning(f"Failed to stop H5 writer: {e}")
-                
+
                 # Keep camera stream alive between recordings.
                 # This avoids repeated warm-up and reduces startup latency/color instability.
                 logging.info("Camera stream kept running for next recording session")
-
-                SystemContext.vr_state.is_stopped = True
-                
-            elif SystemContext.demo_recording_status == "stopping":
-                # Third press: Start new recording
-                logging.info("Starting new demo recording")
-                SystemContext.demo_recording_status = "recording"
-                SystemContext.start_new_recording_requested = True
-                SystemContext.vr_state.is_initialized = True
-                SystemContext.vr_state.is_stopped = False
 
     else:
         return False, torso_mode
