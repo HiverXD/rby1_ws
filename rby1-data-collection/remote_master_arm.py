@@ -68,11 +68,13 @@ class RemoteMasterArm:
         self.timeout    = timeout
 
         # 캐시
-        self._lock      = threading.Lock()
-        self._q         = np.zeros(14, dtype=float)
-        self._gravity   = np.zeros(14, dtype=float)
-        self._btn_right = 0
-        self._btn_left  = 0
+        self._lock         = threading.Lock()
+        self._q            = np.zeros(14, dtype=float)
+        self._gravity      = np.zeros(14, dtype=float)
+        self._btn_right    = 0   # 그리퍼 트리거 (.trigger)
+        self._btn_left     = 0   # 그리퍼 트리거 (.trigger)
+        self._unlock_right = 0   # 잠금 해제 버튼 (.button)
+        self._unlock_left  = 0   # 잠금 해제 버튼 (.button)
         self._ts        = 0.0
         self._mode      = "idle"
         self._connected = False
@@ -112,12 +114,14 @@ class RemoteMasterArm:
                 if msg.get("type") != "state":
                     continue
                 with self._lock:
-                    self._q         = np.array(msg["q"],       dtype=float)
-                    self._gravity   = np.array(msg["gravity"], dtype=float)
-                    self._btn_right = int(msg.get("btn_right", 0))
-                    self._btn_left  = int(msg.get("btn_left",  0))
-                    self._ts        = float(msg.get("ts", time.time()))
-                    self._mode      = msg.get("mode", "gravity")
+                    self._q            = np.array(msg["q"],       dtype=float)
+                    self._gravity      = np.array(msg["gravity"], dtype=float)
+                    self._btn_right    = int(msg.get("btn_right",    0))  # trigger
+                    self._btn_left     = int(msg.get("btn_left",     0))  # trigger
+                    self._unlock_right = int(msg.get("unlock_right", 0))  # button
+                    self._unlock_left  = int(msg.get("unlock_left",  0))  # button
+                    self._ts           = float(msg.get("ts", time.time()))
+                    self._mode         = msg.get("mode", "gravity")
             except socket.timeout:
                 continue
             except Exception:
@@ -238,15 +242,25 @@ class RemoteMasterArm:
     def get_state(self) -> Tuple[np.ndarray, np.ndarray, int, int]:
         """
         최신 캐시된 상태를 반환합니다 (네트워크 접근 없음).
-        Returns: (q_joint(14,), gravity_term(14,), btn_right, btn_left)
+        Returns: (q_joint(14,), gravity_term(14,), btn_right(trigger), btn_left(trigger))
+          - btn_right/btn_left : 그리퍼 트리거 (.trigger) — 그리퍼 open/close 제어용
+        unlock 버튼이 필요하면 get_unlock_state()를 사용하세요.
         """
         with self._lock:
             return (
                 self._q.copy(),
                 self._gravity.copy(),
-                self._btn_right,
-                self._btn_left,
+                self._btn_right,    # .trigger (그리퍼 트리거)
+                self._btn_left,     # .trigger (그리퍼 트리거)
             )
+
+    def get_unlock_state(self) -> Tuple[int, int]:
+        """
+        잠금 해제 버튼 상태를 반환합니다 (.button 필드).
+        Returns: (unlock_right, unlock_left)
+        """
+        with self._lock:
+            return self._unlock_right, self._unlock_left
 
     def get_q(self) -> np.ndarray:
         with self._lock:

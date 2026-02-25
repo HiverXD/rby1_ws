@@ -83,13 +83,15 @@ class MasterArmServer:
         self._gravity_gain = float(gravity_gain)  # 중력 보상 배율
 
         # 상태
-        self._lock         = threading.Lock()
-        self._q            = np.zeros(14, dtype=float)
-        self._gravity      = np.zeros(14, dtype=float)
-        self._btn_right    = 0
-        self._btn_left     = 0
-        self._ts           = 0.0
-        self._mode         = "gravity"   # "gravity" | "homing" | "hold" | "idle"
+        self._lock           = threading.Lock()
+        self._q              = np.zeros(14, dtype=float)
+        self._gravity        = np.zeros(14, dtype=float)
+        self._btn_right      = 0   # 오른쪽 그리퍼 트리거 (.trigger)
+        self._btn_left       = 0   # 왼쪽  그리퍼 트리거 (.trigger)
+        self._unlock_right   = 0   # 오른쪽 잠금 해제 버튼 (.button)
+        self._unlock_left    = 0   # 왼쪽  잠금 해제 버튼 (.button)
+        self._ts             = 0.0
+        self._mode           = "gravity"   # "gravity" | "homing" | "hold" | "idle"
 
         # homing 목표
         self._homing_target       = np.zeros(14, dtype=float)
@@ -146,16 +148,22 @@ class MasterArmServer:
         rby = self._rby
         q    = np.array(ma_state.q_joint,      dtype=float)
         grav = np.array(ma_state.gravity_term,  dtype=float)
-        r_btn = int(ma_state.button_right.button)
-        l_btn = int(ma_state.button_left.button)
+        # .trigger = 그리퍼 open/close 트리거  (btn_right/btn_left로 전달)
+        # .button  = 잠금 해제 버튼            (unlock_right/unlock_left로 전달)
+        r_trigger     = int(ma_state.button_right.trigger)
+        l_trigger     = int(ma_state.button_left.trigger)
+        r_unlock      = int(ma_state.button_right.button)
+        l_unlock      = int(ma_state.button_left.button)
 
         with self._lock:
-            self._q       = q
-            self._gravity = grav
-            self._btn_right = r_btn
-            self._btn_left  = l_btn
-            self._ts      = time.time()
-            mode          = self._mode
+            self._q            = q
+            self._gravity      = grav
+            self._btn_right    = r_trigger
+            self._btn_left     = l_trigger
+            self._unlock_right = r_unlock
+            self._unlock_left  = l_unlock
+            self._ts           = time.time()
+            mode               = self._mode
 
         inp = rby.upc.MasterArm.ControlInput()
 
@@ -221,21 +229,25 @@ class MasterArmServer:
         logger.info(f"상태 브로드캐스트 시작 (포트: {self.state_port})")
         while self._running:
             with self._lock:
-                q       = self._q.tolist()
-                gravity = self._gravity.tolist()
-                r_btn   = self._btn_right
-                l_btn   = self._btn_left
-                ts      = self._ts
-                mode    = self._mode
+                q            = self._q.tolist()
+                gravity      = self._gravity.tolist()
+                r_btn        = self._btn_right
+                l_btn        = self._btn_left
+                r_unlock     = self._unlock_right
+                l_unlock     = self._unlock_left
+                ts           = self._ts
+                mode         = self._mode
 
             payload = json.dumps({
-                "type":      "state",
-                "q":         q,
-                "gravity":   gravity,
-                "btn_right": r_btn,
-                "btn_left":  l_btn,
-                "ts":        ts,
-                "mode":      mode,
+                "type":         "state",
+                "q":            q,
+                "gravity":      gravity,
+                "btn_right":    r_btn,      # 그리퍼 트리거 (.trigger)
+                "btn_left":     l_btn,      # 그리퍼 트리거 (.trigger)
+                "unlock_right": r_unlock,   # 잠금 해제 버튼 (.button)
+                "unlock_left":  l_unlock,   # 잠금 해제 버튼 (.button)
+                "ts":           ts,
+                "mode":         mode,
             }, separators=(",", ":")).encode("utf-8")
 
             # 등록된 클라이언트들에게 전송
@@ -298,16 +310,19 @@ class MasterArmServer:
 
         elif cmd == "get_state":
             with self._lock:
-                q       = self._q.tolist()
-                gravity = self._gravity.tolist()
-                r_btn   = self._btn_right
-                l_btn   = self._btn_left
-                ts      = self._ts
-                mode    = self._mode
+                q        = self._q.tolist()
+                gravity  = self._gravity.tolist()
+                r_btn    = self._btn_right
+                l_btn    = self._btn_left
+                r_unlock = self._unlock_right
+                l_unlock = self._unlock_left
+                ts       = self._ts
+                mode     = self._mode
             return {
                 "ok": True, "cmd": "get_state",
                 "q": q, "gravity": gravity,
                 "btn_right": r_btn, "btn_left": l_btn,
+                "unlock_right": r_unlock, "unlock_left": l_unlock,
                 "ts": ts, "mode": mode,
             }
 
