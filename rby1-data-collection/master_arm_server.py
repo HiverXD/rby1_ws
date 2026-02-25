@@ -97,6 +97,12 @@ class MasterArmServer:
         self._homing_target       = np.zeros(14, dtype=float)
         self._homing_interp_target = np.zeros(14, dtype=float)  # 보간 중간 목표
         self._homing_torque       = np.array([3.5, 3.5, 3.5, 1.5, 1.5, 1.5, 1.5] * 2)
+        # 위치 유지 모드 최대 전류 한계(A): 중력 기반 hold 토크 상한값
+        # 상위 관절(어깨)은 중력 부하가 크므로 더 높게 설정
+        self._hold_torque_max    = np.array([6.0, 6.0, 6.0, 3.5, 3.0, 2.5, 2.0,
+                                             6.0, 6.0, 6.0, 3.5, 3.0, 2.5, 2.0])
+        # hold 토크 여유분(A): 중력 보상값 + 이 마진으로 외란에도 안정적 유지
+        self._hold_torque_margin = 1.5
         self._homing_thresh       = np.deg2rad(5.0)
         self._homing_max_speed    = np.deg2rad(30.0)  # rad/sec (기본 30 deg/sec)
         self._homing_done         = threading.Event()
@@ -251,7 +257,10 @@ class MasterArmServer:
                 with self._lock:
                     hold_r = self._hold_q_right.copy()
                 inp.target_position[:7] = hold_r
-                inp.target_torque[:7]   = self._homing_torque[:7]
+                # 중력 기반 동적 hold 토크: |grav|*gain + 여유분, 상한 클램프
+                hold_t_r = np.abs(grav[:7]) * gain + self._hold_torque_margin
+                hold_t_r = np.clip(hold_t_r, self._homing_torque[:7], self._hold_torque_max[:7])
+                inp.target_torque[:7]   = hold_t_r
 
             # ── 왼팔 (joints 7–13) ─────────────────────────────
             if l_unlock:
@@ -266,7 +275,10 @@ class MasterArmServer:
                 with self._lock:
                     hold_l = self._hold_q_left.copy()
                 inp.target_position[7:] = hold_l
-                inp.target_torque[7:]   = self._homing_torque[7:]
+                # 중력 기반 동적 hold 토크: |grav|*gain + 여유분, 상한 클램프
+                hold_t_l = np.abs(grav[7:]) * gain + self._hold_torque_margin
+                hold_t_l = np.clip(hold_t_l, self._homing_torque[7:], self._hold_torque_max[7:])
+                inp.target_torque[7:]   = hold_t_l
 
         return inp
 
@@ -429,6 +441,21 @@ class MasterArmServer:
             with self._lock:
                 gain = self._gravity_gain
             return {"ok": True, "cmd": "get_gravity_gain", "gain": gain}
+
+        elif cmd == "set_hold_torque_margin":
+            # hold 모드 추가 여유 전류(A) 설정
+            # gravity 기반 hold_torque = |grav|*gain + margin
+            margin = float(msg.get("margin", 1.5))
+            margin = float(np.clip(margin, 0.0, 5.0))  # 안전 범위 제한
+            with self._lock:
+                self._hold_torque_margin = margin
+            logger.info(f"[{addr[0]}] hold_torque_margin → {margin:.2f} A")
+            return {"ok": True, "cmd": "set_hold_torque_margin", "margin": margin}
+
+        elif cmd == "get_hold_torque_margin":
+            with self._lock:
+                margin = self._hold_torque_margin
+            return {"ok": True, "cmd": "get_hold_torque_margin", "margin": margin}
 
         else:
             logger.warning(f"알 수 없는 명령: {cmd}")
