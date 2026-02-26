@@ -10,6 +10,7 @@ class Gripper:
     """
 
     GRIPPER_DIRECTION = False
+    GOAL_CURRENT = 5  # Goal Current limit for CurrentBasedPositionControlMode
 
     def __init__(self):
         self.bus = rby.DynamixelBus(rby.upc.GripperDeviceName)
@@ -19,6 +20,7 @@ class Gripper:
         self.min_q = np.array([np.inf, np.inf])
         self.max_q = np.array([-np.inf, -np.inf])
         self.target_q: np.typing.NDArray = None
+        self._lock = threading.Lock()  # thread-safe target_q access
         self._running = False
         self._thread = None
 
@@ -66,6 +68,15 @@ class Gripper:
                 direction += 1
                 counter = 0
             time.sleep(0.1)
+        # Validate that homing found distinct limits
+        range_q = self.max_q - self.min_q
+        if np.any(np.abs(range_q) < 1e-6):
+            print(
+                f"[Gripper] WARNING: homing range is near-zero: min_q={self.min_q}, max_q={self.max_q}. "
+                "Check encoder reads — gripper may not respond to commands."
+            )
+        else:
+            print(f"[Gripper] Homing done: min_q={self.min_q}, max_q={self.max_q}, range={range_q}")
         return True
 
     def start(self):
@@ -82,11 +93,18 @@ class Gripper:
 
     def loop(self):
         self.set_operating_mode(rby.DynamixelBus.CurrentBasedPositionControlMode)
-        self.bus.group_sync_write_send_torque([(dev_id, 5) for dev_id in [0, 1]])
+        # Bug fix: send_torque must be called every iteration.
+        # Calling it only once before the loop can lose the Goal Current value
+        # if the SDK's send_position internally resets it.
         while self._running:
-            if self.target_q is not None:
+            with self._lock:  # thread-safe snapshot of target_q
+                target = self.target_q.copy() if self.target_q is not None else None
+            if target is not None:
+                self.bus.group_sync_write_send_torque(
+                    [(dev_id, self.GOAL_CURRENT) for dev_id in [0, 1]]
+                )
                 self.bus.group_sync_write_send_position(
-                    [(dev_id, q) for dev_id, q in enumerate(self.target_q.tolist())]
+                    [(dev_id, q) for dev_id, q in enumerate(target.tolist())]
                 )
             time.sleep(0.1)
 
@@ -97,15 +115,16 @@ class Gripper:
         return (self.target_q - self.min_q)/(self.max_q - self.min_q)
 
     def set_normalized_target(self, normalized_q):
-        # self.target_q = normalized_q * (self.max_q - self.min_q) + self.min_q
         if not np.isfinite(self.min_q).all() or not np.isfinite(self.max_q).all():
             print("[Gripper] Cannot set target. min_q or max_q is not valid.")
             return
 
         if Gripper.GRIPPER_DIRECTION:
-            self.target_q = normalized_q * (self.max_q - self.min_q) + self.min_q
+            new_target = normalized_q * (self.max_q - self.min_q) + self.min_q
         else:
-            self.target_q = (1 - normalized_q) * (self.max_q - self.min_q) + self.min_q
+            new_target = (1 - normalized_q) * (self.max_q - self.min_q) + self.min_q
+        with self._lock:  # atomic write shared with loop() thread
+            self.target_q = new_target
 
 
     def get_state(self):
