@@ -77,6 +77,34 @@ def handle_vr_button_event(robot: Union[rby.Robot_A, rby.Robot_M], no_head: bool
         if robot.get_control_manager_state().control_state != rby.ControlManagerState.ControlState.Idle:
             robot.cancel_control()
         if robot.wait_for_control_ready(1000):
+            # Waypoint logic (same as Bimanual Mode) for collision-safe init pose approach:
+            #   elbows NOT bent (from zero)  → midpoint1 → midpoint2 → final init
+            #   elbows bent     (task pose)  → (skip mp1) midpoint2  → final init
+            skip_movej_due_to_elbow = elbows_bending_check(robot)
+
+            if not started and not skip_movej_due_to_elbow and \
+               Settings.right_arm_midpoint1 is not None and Settings.left_arm_midpoint1 is not None:
+                movej(
+                    robot,
+                    np.zeros(torso_dof),
+                    Settings.right_arm_midpoint1,
+                    Settings.left_arm_midpoint1,
+                    np.zeros(head_dof),
+                    minimum_time=7,
+                )
+                started = True
+
+            if Settings.right_arm_midpoint2 is not None and Settings.left_arm_midpoint2 is not None:
+                movej(
+                    robot,
+                    np.zeros(torso_dof),
+                    Settings.right_arm_midpoint2,
+                    Settings.left_arm_midpoint2,
+                    np.zeros(head_dof),
+                    minimum_time=7,
+                )
+                started = True
+
             cbc = (
                 rby.ComponentBasedCommandBuilder()
                 .set_body_command(
