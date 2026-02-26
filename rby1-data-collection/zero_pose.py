@@ -33,7 +33,7 @@ def main(address, model, power, servo):
             right_arm_midpoint2,
             left_arm_midpoint2,
             np.zeros(head_dof),
-            minimum_time=10,
+            minimum_time=5,
         )
 
     if elobw_bending and (right_arm_midpoint1 is not None) and (left_arm_midpoint1 is not None):
@@ -43,7 +43,7 @@ def main(address, model, power, servo):
             right_arm_midpoint1,
             left_arm_midpoint1,
             np.zeros(head_dof),
-            minimum_time=10,
+            minimum_time=5,
         )
 
     movej(
@@ -52,7 +52,7 @@ def main(address, model, power, servo):
         np.zeros(right_arm_dof),
         np.zeros(left_arm_dof),
         np.zeros(head_dof),
-        minimum_time=10,
+        minimum_time=5,
     )
 
     # q_joint_waist = np.array([0, 0, 0, 0, 0, 0]) 
