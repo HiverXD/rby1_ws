@@ -112,6 +112,17 @@ class MasterArmServer:
         self._hold_q_right = np.zeros(7, dtype=float)
         self._hold_q_left  = np.zeros(7, dtype=float)
 
+        # SDK 17_teleoperation_with_joint_mapping 패턴: 중력 보상 + 관절 한계 배리어 + 점성 감쇠
+        self._ma_q_limit_barrier = 0.5
+        self._ma_min_q = np.deg2rad(
+            [-360, -30, 0, -135, -90, 35, -360, -360, 10, -90, -135, -90, 35, -360]
+        )
+        self._ma_max_q = np.deg2rad(
+            [360, -10, 90, -60, 90, 80, 360, 360, 30, 0, -60, 90, 80, 360]
+        )
+        self._ma_torque_limit = np.array([3.5, 3.5, 3.5, 1.5, 1.5, 1.5, 1.5] * 2)
+        self._ma_viscous_gain = np.array([0.02, 0.02, 0.02, 0.02, 0.01, 0.01, 0.002] * 2)
+
         self._master_arm = None
         self._running    = False
 
@@ -158,6 +169,7 @@ class MasterArmServer:
     def _control_cb(self, ma_state):
         rby = self._rby
         q    = np.array(ma_state.q_joint,      dtype=float)
+        qvel = np.array(ma_state.qvel_joint,   dtype=float)
         grav = np.array(ma_state.gravity_term,  dtype=float)
         # .trigger = 그리퍼 open/close 트리거  (btn_right/btn_left로 전달)
         # .button  = 잠금 해제 버튼            (unlock_right/unlock_left로 전달)
@@ -238,16 +250,28 @@ class MasterArmServer:
             inp.target_position[:] = q   # 현재 관절 위치를 목표로 설정
 
         else:  # "gravity"
-            # SDK C++ 예시(master_arm.cpp) 패턴: 팔별로 unlock 버튼에 따라 독립 제어
-            #   버튼 누름(unlock=1): CurrentControlMode + gravity_term*gain  → 팔이 자유롭게 뜸
+            # SDK 17_teleoperation_with_joint_mapping 패턴:
+            #   토크 = gravity_term + q_limit_barrier*(barrier) + viscous_gain*qvel
+            #   버튼 누름(unlock=1): CurrentControlMode + 위 토크 → 팔이 자유롭게 뜸
             #   버튼 OFF (unlock=0): CurrentBasedPositionControlMode + 마지막 위치 → 팔 고정
-            with self._lock:
-                gain = self._gravity_gain
+            #
+            # SDK 원본 코드 그대로 적용 (gravity_term*gain만 사용하면 점성 감쇠가
+            # 없어서 팔이 불안정하고 버튼 해제→누름 전환 시 로봇이 튀는 현상 발생)
+            torque = (
+                grav
+                + self._ma_q_limit_barrier
+                * (
+                    np.maximum(self._ma_min_q - q, 0)
+                    + np.minimum(self._ma_max_q - q, 0)
+                )
+                + self._ma_viscous_gain * qvel
+            )
+            torque = np.clip(torque, -self._ma_torque_limit, self._ma_torque_limit)
 
             # ── 오른팔 (joints 0–6) ─────────────────────────────
             if r_unlock:
                 inp.target_operating_mode[:7].fill(rby.DynamixelBus.CurrentControlMode)
-                inp.target_torque[:7] = grav[:7] * gain
+                inp.target_torque[:7] = torque[:7]
                 with self._lock:
                     self._hold_q_right = q[:7].copy()   # 버튼 누르는 동안 계속 갱신
             else:
@@ -257,15 +281,12 @@ class MasterArmServer:
                 with self._lock:
                     hold_r = self._hold_q_right.copy()
                 inp.target_position[:7] = hold_r
-                # 중력 기반 동적 hold 토크: |grav|*gain + 여유분, 상한 클램프
-                hold_t_r = np.abs(grav[:7]) * gain + self._hold_torque_margin
-                hold_t_r = np.clip(hold_t_r, self._homing_torque[:7], self._hold_torque_max[:7])
-                inp.target_torque[:7]   = hold_t_r
+                inp.target_torque[:7]   = self._ma_torque_limit[:7]
 
             # ── 왼팔 (joints 7–13) ─────────────────────────────
             if l_unlock:
                 inp.target_operating_mode[7:].fill(rby.DynamixelBus.CurrentControlMode)
-                inp.target_torque[7:] = grav[7:] * gain
+                inp.target_torque[7:] = torque[7:]
                 with self._lock:
                     self._hold_q_left = q[7:].copy()    # 버튼 누르는 동안 계속 갱신
             else:
@@ -275,10 +296,7 @@ class MasterArmServer:
                 with self._lock:
                     hold_l = self._hold_q_left.copy()
                 inp.target_position[7:] = hold_l
-                # 중력 기반 동적 hold 토크: |grav|*gain + 여유분, 상한 클램프
-                hold_t_l = np.abs(grav[7:]) * gain + self._hold_torque_margin
-                hold_t_l = np.clip(hold_t_l, self._homing_torque[7:], self._hold_torque_max[7:])
-                inp.target_torque[7:]   = hold_t_l
+                inp.target_torque[7:]   = self._ma_torque_limit[7:]
 
         return inp
 
