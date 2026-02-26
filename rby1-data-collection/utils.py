@@ -1,5 +1,4 @@
-import numpy as np 
-from sensor_msgs.msg import Image
+import numpy as np
 import os
 import yaml
 import logging
@@ -8,7 +7,12 @@ from typing import Union
 import cv2
 import h5py
 
-def rosimg_to_numpy(msg: Image) -> np.ndarray:
+try:
+    from sensor_msgs.msg import Image
+except ImportError:
+    Image = None  # ROS not available; rosimg_to_numpy() will not be usable
+
+def rosimg_to_numpy(msg) -> np.ndarray:
     """Convert sensor_msgs/Image → np.ndarray (HxWxC, uint8)."""
     dtype = np.uint8  # adjust if msg.encoding differs
     img = np.frombuffer(msg.data, dtype=dtype)
@@ -18,14 +22,24 @@ def rosimg_to_numpy(msg: Image) -> np.ndarray:
 
 def get_next_h5_path(base_dir="/home/nvidia/rby1_ws/rby1-data-collection/Demo"):
 # def get_next_h5_path(base_dir="/media/nvidia/T7/Demo"):
-    # Count existing episode folders
-    existing = [d for d in os.listdir(base_dir) if d.startswith("episode_") and os.path.isdir(os.path.join(base_dir, d))]
-    next_index = len(existing)
-    
+    os.makedirs(base_dir, exist_ok=True)
+
+    # 기존 episode 폴더 번호 중 최댓값 + 1을 다음 인덱스로 사용.
+    # len() 대신 max()를 사용하는 이유:
+    #   Discard 등으로 중간 번호가 삭제될 경우 len() == 기존 번호와 충돌하여 덮어씌우는 버그 방지.
+    existing_indices = []
+    for d in os.listdir(base_dir):
+        if d.startswith("episode_") and os.path.isdir(os.path.join(base_dir, d)):
+            suffix = d[len("episode_"):]
+            if suffix.isdigit():
+                existing_indices.append(int(suffix))
+
+    next_index = (max(existing_indices) + 1) if existing_indices else 0
+
     # Create episode folder
     episode_dir = os.path.join(base_dir, f"episode_{next_index}")
     os.makedirs(episode_dir, exist_ok=True)
-    
+
     # Create path for h5 file inside episode folder
     return os.path.join(episode_dir, f"demo_{next_index}.h5")
 
@@ -74,7 +88,7 @@ def elbows_bending_check(robot: rby.Robot_A) -> bool:
 
         # Load threshold from YAML
         try:
-            with open('rby1-data-collection/config.yaml', encoding='utf-8') as f:
+            with open("/home/hyunjin/RBY1_migration/rby1_ws/rby1-data-collection/config.yaml", encoding='utf-8') as f:
                 config = yaml.safe_load(f)
             elbow_threshold_deg = config.get('elbow_angle_threshold_deg', 90)
         except (FileNotFoundError, yaml.YAMLError) as e:
