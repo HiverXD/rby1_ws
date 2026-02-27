@@ -7,9 +7,11 @@ demo_root: '/media/hyunjin/T7/rby1_demo/' # 직접 이 컴퓨터에서 했을 �
 rec_fps: 15  # recording FPS for demo logger thread
 
 # dataset conversion
-dataset_saving_root: "/home/hyunjin/RBY1_migration/lerobot/custom_lerobot_dataset"
+v3_dataset_saving_root: "/media/hyunjin/T7/rby1_demo/LeRobotDataset_v3"
+v2_dataset_saving_root: "/media/hyunjin/T7/rby1_demo/LeRobotDataset_v2"
 conversion_task_name: "PuttingCupintotheDishV2" # "PuttingCupintotheDish" # 어떤 task의 데모를 변환할 것인지 지정하기 위한 config
-# 이제 변환된 데이터셋은 RBY1_migration/lerobot에 저장됩니다. 
+# h5 -> LeRobotDataset v3으로 1차적으로 /media/hyunjin/T7/rby1_demo/LeRobotDataset_v3/{conversion_task_name}에 저장한 후
+# v3 -> v2로 2차적으로 변환된 최종 데이터셋은  /media/hyunjin/T7/rby1_demo/LeRobotDataset_v2/{conversion_task_name}에 저장됩니다. 
 
 user_name : "edipark" # Hugging Face 데이터 push를 위한 user name
 
