@@ -12,7 +12,7 @@ import yaml
 import os
 
 # demo writer
-from h5py_writer_cam import H5Writer
+from h5_writer import H5Writer
 from pcd_utils import rgbd_to_pointcloud, REALSENSE_D435_INTRINSICS, REALSENSE_D435_INTRINSICS_848x480
 
 from utils import *
@@ -57,8 +57,10 @@ def publish_gv(sock: zmq.Socket):
             logging.warning(f"[publish_gv] Failed to publish state: {e}")
         time.sleep(0.1)
 
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.yaml')
+
 def get_config():
-    with open('/home/hyunjin/RBY1_migration/rby1_ws/rby1-data-collection/config.yaml', encoding='utf-8') as f:
+    with open(_CONFIG_PATH, encoding='utf-8') as f:
         config = yaml.safe_load(f)
         return config
 
@@ -804,7 +806,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    with open("/home/hyunjin/RBY1_migration/rby1_ws/rby1-data-collection/config.yaml", encoding='utf-8') as f:
+    with open(_CONFIG_PATH, encoding='utf-8') as f:
         config = yaml.safe_load(f)
         user_pc_ip = config['user_pc_ip']
         metaquest_ip = config['metaquest_ip']

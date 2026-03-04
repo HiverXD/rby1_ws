@@ -1,207 +1,296 @@
+#!/usr/bin/env python3
+"""
+Unified replay script for RBY1 demonstrations.
+
+Replays H5-recorded demos back to the robot.  Supports four replay modes
+that can be selected via ``--mode``:
+
+  joints   – replay robot_target_joints (torso + arms)  [default]
+  base     – replay base_state (mobility) + robot_target_joints
+  gripper  – replay gripper_target only
+  all      – replay joints + base + gripper together
+
+Usage:
+  python replay.py --rby1 192.168.0.50:50051 --h5 /path/to/demo.h5 --mode joints
+  python replay.py --rby1 192.168.0.50:50051 --h5 /path/to/demo.h5 --mode all
+"""
+
 import argparse
-import zmq
 import logging
-import rby1_sdk as rby
-from dataclasses import dataclass
-from typing import Union, Optional
-import numpy as np
-from vr_control_state import VRControlState
-import threading
-from h5py_writer import H5Writer
 import time
+
 import h5py
-from gripper import Gripper
+import numpy as np
+import rby1_sdk as rby
 
-@dataclass(frozen=True)
-class Settings:
-    dt: float = 0.1
-    hand_offset: float = np.array([0.0, 0.0, 0.0])
+from helper import initialize_robot
 
-    T_hand_offset = np.identity(4)
-    T_hand_offset[0:3, 3] = hand_offset
-
-    vr_control_local_port: int = 5005
-    vr_control_meta_quest_port: int = 6000
-
-    mobile_linear_acceleration_gain: float = 0.15
-    mobile_angular_acceleration_gain: float = 0.15
-    mobile_linear_damping_gain: float = 0.3
-    mobile_angular_damping_gain: float = 0.3
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)-8s - %(message)s"
+)
 
 
-class SystemContext:
-    robot_model: Union[rby.Model_A, rby.Model_M] = None
-    vr_state: VRControlState = VRControlState()
-    # H5 writer and recording stop-event stored here so other threads/handlers can access them
-    h5_writer: Optional[H5Writer] = None
-    rec_stop_event: Optional[threading.Event] = None
+# ---------------------------------------------------------------------------
+# Gripper helper (best-effort)
+# ---------------------------------------------------------------------------
 
+def _init_gripper(robot, no_gripper: bool = False):
+    """Try to initialise the local Dynamixel gripper.  Returns None on failure."""
+    if no_gripper:
+        return None
+    try:
+        from gripper import Gripper
 
-def connect_rby1(address: str, model: str = "a", no_head: bool = False):
-    logging.info(f"Attempting to connect to RB-Y1... (Address: {address}, Model: {model})")
-    robot = rby.create_robot(address, model)
+        for arm in ("left", "right"):
+            try:
+                robot.set_tool_flange_output_voltage(arm, 12)
+            except Exception:
+                pass
+        time.sleep(0.5)
 
-    connected = robot.connect()
-    if not connected:
-        logging.critical("Failed to connect to RB-Y1. Exiting program.")
-        exit(1)
-    logging.info("Successfully connected to RB-Y1.")
-
-    servo_pattern = "^(?!head_).*" if no_head else ".*"
-    if not robot.is_power_on(servo_pattern):
-        logging.warning("Robot power is off. Turning it on...")
-        if not robot.power_on(servo_pattern):
-            logging.critical("Failed to power on. Exiting program.")
-            exit(1)
-        logging.info("Power turned on successfully.")
-    else:
-        logging.info("Power is already on.")
-
-    if not robot.is_servo_on(".*"):
-        logging.warning("Servo is off. Turning it on...")
-        if not robot.servo_on(".*"):
-            logging.critical("Failed to turn on the servo. Exiting program.")
-            exit(1)
-        logging.info("Servo turned on successfully.")
-    else:
-        logging.info("Servo is already on.")
-
-    cm_state = robot.get_control_manager_state().state
-    if cm_state in [
-        rby.ControlManagerState.State.MajorFault,
-        rby.ControlManagerState.State.MinorFault,
-    ]:
-        logging.warning(f"Control Manager is in Fault state: {cm_state.name}. Attempting reset...")
-        if not robot.reset_fault_control_manager():
-            logging.critical("Failed to reset Control Manager. Exiting program.")
-            exit(1)
-        logging.info("Control Manager reset successfully.")
-    if not robot.enable_control_manager(unlimited_mode_enabled=True):
-        logging.critical("Failed to enable Control Manager. Exiting program.")
-        exit(1)
-    logging.info("Control Manager successfully enabled. (Unlimited Mode: enabled)")
-
-    SystemContext.robot_model = robot.model()
-    robot.start_state_update(robot_state_callback, 1 / Settings.dt)
-
-    return robot
-
-
-def robot_state_callback(robot_state: rby.RobotState_A):
-    SystemContext.vr_state.joint_positions = robot_state.position # NOTE: where the current robot state is saved 
-    SystemContext.vr_state.center_of_mass = robot_state.center_of_mass
-
-
-def main(args: argparse.Namespace):
-    MINIMUM_TIME = 0.5  # seconds
-    frequency = 1  # Hz
-    h5_file_path = '/media/nvidia/T7/Demo/demo_97.h5'
-
-    robot = connect_rby1(args.rby1, args.rby1_model, args.no_head)
-
-    with h5py.File(h5_file_path, 'r') as f:
-        dataset = f['samples/robot_target_joints']
-        # initialize local gripper once (best-effort). If unavailable, we'll fall back to SDK calls.
-        gr = None
+        gr = Gripper()
+        if not gr.initialize(verbose=True):
+            logging.warning("Gripper.initialize() returned False — continuing without gripper.")
+            return None
         try:
-            gr = Gripper()
-            if not gr.initialize(verbose=False):
-                gr = None
-            else:
-                try:
-                    gr.homing()
-                except Exception:
-                    pass
-                try:
-                    gr.start()
-                except Exception:
-                    pass
+            gr.homing()
         except Exception:
-            gr = None
+            pass
+        try:
+            gr.start()
+        except Exception:
+            pass
+        return gr
+    except Exception:
+        logging.warning("Could not initialise Gripper (continuing without).")
+        return None
 
-        for data in dataset:
-            start_time = time.time()
-            # data layout: [gripper_right, gripper_left, torso(6), right_arm(7), left_arm(7)]
+
+# ---------------------------------------------------------------------------
+# Per-mode replay implementations
+# ---------------------------------------------------------------------------
+
+def replay_joints(robot, h5_path: str, *, frequency: float = 1.0, minimum_time: float = 0.5):
+    """Replay robot_target_joints (torso + both arms).  Gripper via local driver."""
+    gripper = _init_gripper(robot, no_gripper=False)
+
+    with h5py.File(h5_path, "r") as f:
+        dataset = f["samples/robot_target_joints"]
+        n = len(dataset)
+        logging.info(f"[joints] Replaying {n} samples from {h5_path}")
+
+        for i in range(n):
+            t0 = time.time()
+            data = dataset[i]
+            torso = data[2:8]
+            right_arm = data[8:15]
+            left_arm = data[15:22]
             gripper_state = np.asarray(data[0:2], dtype=float)
-            torso_joints = data[2:8]
-            right_joints = data[8:15]
-            left_joints = data[15:22]
 
             rc = rby.RobotCommandBuilder().set_command(
                 rby.ComponentBasedCommandBuilder().set_body_command(
                     rby.BodyComponentBasedCommandBuilder()
-                    .set_torso_command(
-                        rby.JointPositionCommandBuilder()
-                        .set_minimum_time(MINIMUM_TIME)
-                        .set_position(torso_joints)
-                    )
-                    .set_right_arm_command(
-                        rby.JointPositionCommandBuilder()
-                        .set_minimum_time(MINIMUM_TIME)
-                        .set_position(right_joints)
-                    )
-                    .set_left_arm_command(
-                        rby.JointPositionCommandBuilder()
-                        .set_minimum_time(MINIMUM_TIME)
-                        .set_position(left_joints)
-                    )
+                    .set_torso_command(rby.JointPositionCommandBuilder().set_minimum_time(minimum_time).set_position(torso))
+                    .set_right_arm_command(rby.JointPositionCommandBuilder().set_minimum_time(minimum_time).set_position(right_arm))
+                    .set_left_arm_command(rby.JointPositionCommandBuilder().set_minimum_time(minimum_time).set_position(left_arm))
                 )
             )
-
-            # send body command
             try:
-                rv = robot.send_command(rc, 10).get()
+                robot.send_command(rc, 10).get()
             except Exception:
-                rv = None
+                logging.exception("Failed to send joint command at sample %d", i)
 
-            # apply gripper state for this timestep (best-effort)
-            try:
-                # Prefer the local Gripper class if initialized
-                if gr is not None:
-                    # gripper expects normalized target array [right, left]
+            # Gripper (best-effort)
+            if gripper is not None:
+                try:
+                    gripper.set_normalized_target(gripper_state)
+                except Exception:
+                    pass
+
+            time.sleep(max(0, 1 / frequency - (time.time() - t0)))
+
+
+def replay_base(robot, h5_path: str, *, frequency: float = 1.0, minimum_time: float = 0.5, dt: float = 0.1):
+    """Replay robot_target_joints + base_state (mobility)."""
+    with h5py.File(h5_path, "r") as f:
+        joint_ds = f.get("samples/robot_target_joints")
+        base_ds = f.get("samples/base_state")
+
+        if joint_ds is not None:
+            n = len(joint_ds)
+            logging.info(f"[base] Replaying {n} samples (joints + mobility)")
+
+            for i in range(n):
+                t0 = time.time()
+                data = joint_ds[i]
+                torso = data[2:8]
+                right_arm = data[8:15]
+                left_arm = data[15:22]
+
+                cbb = rby.ComponentBasedCommandBuilder()
+
+                # Mobility
+                if base_ds is not None:
                     try:
-                        gr.set_normalized_target(gripper_state)
-                    except Exception as e:
-                        logging.debug(f"Failed to set local gripper target: {e}")
-                else:
-                    # Fallback: try setting via SDK RPC (simulator-friendly). Use best-effort calls.
-                    try:
-                        # right
-                        val_r = float(np.asarray(gripper_state).reshape(-1)[0])
-                        try:
-                            robot.set_tool_position("right", val_r)
-                        except Exception:
-                            pass
-                        # left (if present)
-                        if gripper_state.size > 1:
-                            val_l = float(np.asarray(gripper_state).reshape(-1)[1])
-                            try:
-                                robot.set_tool_position("left", val_l)
-                            except Exception:
-                                pass
+                        b = np.asarray(base_ds[i])
+                        lin = np.array([b[0], b[1]])
+                        ang = float(b[2])
+                        mob = rby.SE2VelocityCommandBuilder().set_velocity(-lin, -ang).set_minimum_time(dt * 1.01)
+                        cbb.set_mobility_command(mob)
                     except Exception:
-                        pass
+                        logging.exception("Failed to read base_state at sample %d", i)
+
+                cbb.set_body_command(
+                    rby.BodyComponentBasedCommandBuilder()
+                    .set_torso_command(rby.JointPositionCommandBuilder().set_minimum_time(minimum_time).set_position(torso))
+                    .set_right_arm_command(rby.JointPositionCommandBuilder().set_minimum_time(minimum_time).set_position(right_arm))
+                    .set_left_arm_command(rby.JointPositionCommandBuilder().set_minimum_time(minimum_time).set_position(left_arm))
+                )
+
+                try:
+                    robot.send_command(rby.RobotCommandBuilder().set_command(cbb), 10).get()
+                except Exception:
+                    logging.exception("Failed to send command at sample %d", i)
+
+                time.sleep(max(0, 1 / frequency - (time.time() - t0)))
+
+        elif base_ds is not None:
+            n = len(base_ds)
+            logging.info(f"[base] No joint data — replaying {n} base-only samples")
+            for i in range(n):
+                t0 = time.time()
+                try:
+                    b = np.asarray(base_ds[i])
+                    mob = rby.SE2VelocityCommandBuilder().set_velocity(
+                        -np.array([b[0], b[1]]), -float(b[2])
+                    ).set_minimum_time(dt * 1.01)
+                    rc = rby.RobotCommandBuilder().set_command(
+                        rby.ComponentBasedCommandBuilder().set_mobility_command(mob)
+                    )
+                    robot.send_command(rc, 10).get()
+                except Exception:
+                    logging.exception("Failed at base sample %d", i)
+                time.sleep(max(0, 1 / frequency - (time.time() - t0)))
+        else:
+            logging.error("H5 has neither robot_target_joints nor base_state")
+
+
+def replay_gripper(robot, h5_path: str, *, frequency: float = 10.0,
+                   no_gripper: bool = False, dry_run: bool = False, invert: bool = False):
+    """Replay gripper_target only."""
+    gripper = _init_gripper(robot, no_gripper=no_gripper)
+
+    with h5py.File(h5_path, "r") as f:
+        ds = f.get("samples/gripper_target") or f.get("samples/gripper_state")
+        if ds is None:
+            logging.error("No gripper_target or gripper_state found in HDF5")
+            return
+
+        n = len(ds)
+        logging.info(f"[gripper] Replaying {n} samples (dry_run={dry_run})")
+        for i in range(n):
+            t0 = time.time()
+            g = np.asarray(ds[i]).ravel()
+            if invert:
+                g = 1.0 - g
+            logging.info(f"Sample {i}: gripper={g}")
+            if not dry_run and gripper is not None:
+                try:
+                    gripper.set_normalized_target(g)
+                except Exception:
+                    logging.exception("Failed at gripper sample %d", i)
+            time.sleep(max(0, 1 / frequency - (time.time() - t0)))
+
+
+def replay_all(robot, h5_path: str, *, frequency: float = 1.0, minimum_time: float = 0.5, dt: float = 0.1):
+    """Replay joints + base + gripper simultaneously."""
+    gripper = _init_gripper(robot, no_gripper=False)
+
+    with h5py.File(h5_path, "r") as f:
+        joint_ds = f.get("samples/robot_target_joints")
+        base_ds = f.get("samples/base_state")
+        grip_ds = f.get("samples/gripper_target") or f.get("samples/gripper_state")
+
+        if joint_ds is None:
+            logging.error("samples/robot_target_joints not found in H5")
+            return
+
+        n = len(joint_ds)
+        logging.info(f"[all] Replaying {n} samples (joints + base + gripper)")
+
+        for i in range(n):
+            t0 = time.time()
+            data = joint_ds[i]
+            torso = data[2:8]
+            right_arm = data[8:15]
+            left_arm = data[15:22]
+
+            cbb = rby.ComponentBasedCommandBuilder()
+
+            # Mobility
+            if base_ds is not None and i < len(base_ds):
+                try:
+                    b = np.asarray(base_ds[i])
+                    mob = rby.SE2VelocityCommandBuilder().set_velocity(
+                        -np.array([b[0], b[1]]), -float(b[2])
+                    ).set_minimum_time(dt * 1.01)
+                    cbb.set_mobility_command(mob)
+                except Exception:
+                    pass
+
+            cbb.set_body_command(
+                rby.BodyComponentBasedCommandBuilder()
+                .set_torso_command(rby.JointPositionCommandBuilder().set_minimum_time(minimum_time).set_position(torso))
+                .set_right_arm_command(rby.JointPositionCommandBuilder().set_minimum_time(minimum_time).set_position(right_arm))
+                .set_left_arm_command(rby.JointPositionCommandBuilder().set_minimum_time(minimum_time).set_position(left_arm))
+            )
+
+            try:
+                robot.send_command(rby.RobotCommandBuilder().set_command(cbb), 10).get()
             except Exception:
-                pass
+                logging.exception("Failed at sample %d", i)
 
-            time.sleep(max(0, 1/frequency-(time.time() - start_time)))
-            
+            # Gripper
+            if gripper is not None and grip_ds is not None and i < len(grip_ds):
+                try:
+                    gripper.set_normalized_target(np.asarray(grip_ds[i]).ravel())
+                except Exception:
+                    pass
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="RB-Y1 VR Control Launcher")
-    parser.add_argument(
-        "--rby1", default="192.168.30.1:50051", type=str,
-        help="gRPC address of the RB-Y1 robot (default: 192.168.30.1:50051)"
-    )
-    parser.add_argument(
-        "--rby1_model", default="a", type=str,
-        help="Model type of the RB-Y1 robot (default: a)"
-    )
-    parser.add_argument(
-        "--no_head", action="store_true", 
-        help="Run without controlling the head"
-    )
+            time.sleep(max(0, 1 / frequency - (time.time() - t0)))
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="RBY1 unified demo replay")
+    parser.add_argument("--rby1", type=str, default="192.168.0.50:50051", help="Robot gRPC address")
+    parser.add_argument("--rby1_model", type=str, default="a", help="Robot model (default: a)")
+    parser.add_argument("--no_head", action="store_true", help="Exclude head servos")
+    parser.add_argument("--h5", type=str, required=True, help="Path to H5 demo file")
+    parser.add_argument("--mode", choices=["joints", "base", "gripper", "all"], default="joints",
+                        help="Replay mode (default: joints)")
+    parser.add_argument("--frequency", type=float, default=1.0, help="Replay Hz (default: 1.0)")
+    parser.add_argument("--no_gripper", action="store_true", help="Skip gripper init")
+    parser.add_argument("--dry_run", action="store_true", help="(gripper mode) log only, don't actuate")
+    parser.add_argument("--invert_gripper", action="store_true", help="(gripper mode) invert open/close")
 
     args = parser.parse_args()
 
-    main(args)
+    robot = initialize_robot(args.rby1, args.rby1_model)
+
+    if args.mode == "joints":
+        replay_joints(robot, args.h5, frequency=args.frequency)
+    elif args.mode == "base":
+        replay_base(robot, args.h5, frequency=args.frequency)
+    elif args.mode == "gripper":
+        replay_gripper(robot, args.h5, frequency=args.frequency,
+                       no_gripper=args.no_gripper, dry_run=args.dry_run, invert=args.invert_gripper)
+    elif args.mode == "all":
+        replay_all(robot, args.h5, frequency=args.frequency)
+
+
+if __name__ == "__main__":
+    main()

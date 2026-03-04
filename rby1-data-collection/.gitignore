@@ -1,5 +1,5 @@
 data/*.mp4
-__pycache__/*
+__pycache__/
 *.h5
 *.pyc
 *.png
@@ -7,4 +7,4 @@ __pycache__/*
 *.tar
 *.log
 *.pcd
-*.pyc
+.vscode/

@@ -88,7 +88,8 @@ def elbows_bending_check(robot: rby.Robot_A) -> bool:
 
         # Load threshold from YAML
         try:
-            with open("/home/hyunjin/RBY1_migration/rby1_ws/rby1-data-collection/config.yaml", encoding='utf-8') as f:
+            _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.yaml')
+            with open(_cfg_path, encoding='utf-8') as f:
                 config = yaml.safe_load(f)
             elbow_threshold_deg = config.get('elbow_angle_threshold_deg', 90)
         except (FileNotFoundError, yaml.YAMLError) as e:

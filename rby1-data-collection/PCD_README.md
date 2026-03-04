@@ -7,7 +7,7 @@ RGB-D 데이터를 3D Point Cloud로 변환하여 PCD 파일로 저장합니다.
 ```
 rby1-data-collection/
 ├── pcd_utils.py           # PCD 변환 유틸리티
-├── h5py_writer.py         # 자동 PCD 저장 포함
+├── h5_writer.py           # 자동 PCD 저장 포함 (multi-camera H5 writer)
 ├── main.py                # 데이터 수집
 └── data/
     ├── demo_0.h5          # HDF5 데이터
