@@ -110,6 +110,11 @@ def elbows_bending_check(robot: rby.Robot_A) -> bool:
     return False
 
 def save_video(h5_path, output_filename="robot_video.avi", camera_name='head', fps=30):
+    """H5 파일의 카메라 이미지를 비디오로 저장.
+    
+    Note: camera.py가 rgb8 포맷으로 수집하므로 h5의 이미지는 RGB 순서입니다.
+    기존 bgr8로 수집된 h5 파일에 대해서는 색상이 뒤바뀔 수 있습니다.
+    """
     if not os.path.exists(h5_path):
         logging.warning(f"❌ 파일을 찾을 수 없습니다.")
         return

@@ -73,7 +73,7 @@ class MultiRealsense:
                 config = rs.config()
                 config.enable_device(serial)
                 config.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
-                config.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
+                config.enable_stream(rs.stream.color, self.width, self.height, rs.format.rgb8, self.fps)
 
                 self.pipelines[serial] = pipe
                 self.configs[serial] = config
@@ -123,7 +123,7 @@ class MultiRealsense:
         cfg = rs.config()
         cfg.enable_device(serial)
         cfg.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
-        cfg.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
+        cfg.enable_stream(rs.stream.color, self.width, self.height, rs.format.rgb8, self.fps)
         self.pipelines[serial] = pipe
         self.configs[serial] = cfg
         self.aligns[serial] = rs.align(rs.stream.color)
