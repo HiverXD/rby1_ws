@@ -1,4 +1,4 @@
-import copy
+import gc
 import threading
 import logging
 import numpy as np
@@ -61,24 +61,20 @@ class MultiRealsense:
         # 최종 “동기화된” 프레임 세트
         self.synced_frames: Dict[str, RGBDFrame] = {}
 
-        # Discover and initialize cameras
-        ctx = rs.context()
-        devices = ctx.query_devices()
-        available_serials = {dev.get_info(rs.camera_info.serial_number) for dev in devices}
+        # Discover available devices (temporary context — released before pipeline creation)
+        _discovery_ctx = rs.context()
+        available_serials = {
+            dev.get_info(rs.camera_info.serial_number)
+            for dev in _discovery_ctx.query_devices()
+        }
+        del _discovery_ctx
+        gc.collect()
         logging.info(f"연결된 RealSense 장치 ({len(available_serials)}개): {sorted(available_serials)}")
 
+        # Per-camera pipeline creation (each pipeline gets its own internal context)
         for serial in self.serials:
             if serial in available_serials:
-                pipe = rs.pipeline(ctx)
-                config = rs.config()
-                config.enable_device(serial)
-                config.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
-                config.enable_stream(rs.stream.color, self.width, self.height, rs.format.rgb8, self.fps)
-
-                self.pipelines[serial] = pipe
-                self.configs[serial] = config
-                self.aligns[serial] = rs.align(rs.stream.color)
-
+                self._make_pipeline_and_config(serial)
                 self.buffers[serial] = deque(maxlen=self.buffer_size)
                 logging.info(f"Camera {serial} configured.")
             else:
@@ -113,13 +109,13 @@ class MultiRealsense:
         }
 
     def _make_pipeline_and_config(self, serial: str):
-        """새 rs.context/pipeline/config/align 을 생성하여 해당 시리얼에 등록합니다.
+        """새 pipeline/config/align 을 생성하여 해당 시리얼에 등록합니다.
         
-        실패한 pipeline.start() 이후 UVC 장치가 반쯤 열린 상태(half-open)로 남는
-        LibRealSense 버그를 우회하기 위해 재시도마다 새 객체를 씁니다.
+        rs.pipeline()을 context 인자 없이 생성하면 내부적으로 독립 context를
+        만들므로, 카메라 간 USB 핸들이 격리되어 한 카메라의 실패가 다른
+        카메라에 영향을 주지 않습니다.
         """
-        ctx = rs.context()
-        pipe = rs.pipeline(ctx)
+        pipe = rs.pipeline()  # 독립 context 자동 생성 → 카메라 간 격리
         cfg = rs.config()
         cfg.enable_device(serial)
         cfg.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
@@ -177,12 +173,15 @@ class MultiRealsense:
                                     if dev.get_info(rs.camera_info.serial_number) == serial:
                                         logging.warning(f"[{serial}] 하드웨어 리셋 시도...")
                                         dev.hardware_reset()
-                                        time.sleep(4.0)  # 리셋 후 USB 재열거 대기
                                         break
+                                del ctx_tmp
+                                gc.collect()
+                                time.sleep(5.0)  # 리셋 후 USB 재열거 대기
                             except Exception as hw_e:
                                 logging.warning(f"[{serial}] 하드웨어 리셋 실패 (무시): {hw_e}")
                         # 새 pipeline/config 객체 생성 (half-open 객체 버림)
                         self._make_pipeline_and_config(serial)
+                        gc.collect()
                     else:
                         logging.error(
                             f"Failed to start pipeline for camera {serial} "
@@ -227,18 +226,19 @@ class MultiRealsense:
         if serial not in self.pipelines:
             return False
 
-        pipe = self.pipelines[serial]
-        cfg = self.configs[serial]
-
         try:
-            pipe.stop()
+            self.pipelines[serial].stop()
         except Exception:
             pass
 
         max_retries = 3
         for attempt in range(1, max_retries + 1):
+            # 매 시도마다 새 pipeline/config 생성 (half-open 상태 방지)
+            self._make_pipeline_and_config(serial)
+            gc.collect()
+            time.sleep(0.5)
             try:
-                profile = pipe.start(cfg)
+                profile = self.pipelines[serial].start(self.configs[serial])
                 self._apply_auto_controls(profile, serial)
                 with self.lock:
                     if serial in self.buffers:
@@ -248,7 +248,11 @@ class MultiRealsense:
                 return True
             except Exception as e:
                 logging.warning(f"[{serial}] pipeline restart failed (attempt {attempt}/{max_retries}): {e}")
-                time.sleep(0.5)
+                try:
+                    self.pipelines[serial].stop()
+                except Exception:
+                    pass
+                time.sleep(1.0)
 
         logging.error(f"[{serial}] pipeline restart failed after {max_retries} attempts")
         return False
@@ -292,8 +296,8 @@ class MultiRealsense:
                 ts_ms = float(color_frame.get_timestamp())
                 ts_s = ts_ms / 1000.0
 
-                depth_image = np.asanyarray(depth_frame.get_data())
-                color_image = np.asanyarray(color_frame.get_data())
+                depth_image = np.array(depth_frame.get_data(), copy=True)
+                color_image = np.array(color_frame.get_data(), copy=True)
 
                 fr = RGBDFrame(
                     t=ts_s,
@@ -346,12 +350,14 @@ class MultiRealsense:
 
     def _sync_loop(self):
         """
-        모든 카메라 버퍼에서 timestamp가 가장 비슷한 프레임을 골라
-        하나의 “동기화된 프레임 세트”로 만든다.
-        """
-        tol_s = self.sync_tolerance_ms / 1000.0
+        모든 카메라 버퍼에서 가장 최신 프레임을 골라 프레임 세트로 만든다.
 
-        # 기준 카메라 — 실제로 시작된(buffers에 있는) 첫 번째 카메라 사용
+        중요: 하드웨어 동기화 없는 독립 카메라에서는 센서 타임스탬프가
+        각각 다른 클록 도메인(hardware_clock)일 수 있으므로, tolerance를 초과해도
+        sync를 항상 성공시키고 각 카메라의 최신 프레임을 반환한다.
+        """
+        interval = max(0.001, 1.0 / self.fps / 2)
+
         ref_serial = next(iter(self.buffers), None)
         if ref_serial is None:
             logging.error("No cameras started — sync loop exiting.")
@@ -360,53 +366,41 @@ class MultiRealsense:
 
         while self.running:
             with self.lock:
-                # 레퍼런스 버퍼가 비어 있으면 기다림
-                if len(self.buffers[ref_serial]) == 0:
+                ref_buf = self.buffers.get(ref_serial)
+                if not ref_buf:
                     pass
                 else:
-                    # 레퍼런스의 “가장 최신” 프레임을 기준시각으로 사용
-                    ref_frame = self.buffers[ref_serial][-1]
-                    t_ref = ref_frame.t
+                    ref_frame = ref_buf[-1]
+                    candidates: Dict[str, RGBDFrame] = {ref_serial: ref_frame}
+                    all_have_data = True
 
-                    candidate_set: Dict[str, RGBDFrame] = {ref_serial: ref_frame}
-                    ok = True
-
-                    # 다른 카메라에서 t_ref에 가장 가까운 프레임 찾기
                     for serial, buf in self.buffers.items():
                         if serial == ref_serial:
                             continue
                         if len(buf) == 0:
-                            ok = False
+                            all_have_data = False
                             break
+                        # 항상 최신 프레임 사용 (타임스탬프 도메인 차이에 무관)
+                        candidates[serial] = buf[-1]
 
-                        # buf 안에서 |t - t_ref| 최소인 프레임 선택
-                        best = min(buf, key=lambda f: abs(f.t - t_ref))
-                        if abs(best.t - t_ref) > tol_s:
-                            ok = False
-                            break
-                        candidate_set[serial] = best
+                    if all_have_data:
+                        self.synced_frames = candidates
 
-                    if ok:
-                        # ✅ 동기화 성공: synced_frames 갱신
-                        self.synced_frames = copy.deepcopy(candidate_set)
-
-                        # (선택) 너무 오래된 프레임 정리:
-                        # 기준시각보다 한참 과거 프레임들은 버퍼에서 제거해 지연/메모리 감소
+                        # 메모리 관리: 각 버퍼에 최근 5개만 유지
                         for serial, buf in self.buffers.items():
-                            # t_ref - 2*tol 보다 오래된 건 제거
-                            while len(buf) > 0 and buf[0].t < (t_ref - 2 * tol_s):
+                            while len(buf) > 5:
                                 buf.popleft()
 
-            # sync 루프 주기 (너무 빠르게 돌지 않게)
-            time.sleep(max(0, 1.0 / self.fps / 2))
+            time.sleep(interval)
 
     def get_frames(self) -> Dict[str, RGBDFrame]:
         """
-        ✅ 동기화된 프레임 세트를 반환.
-        모든 시리얼이 존재하지 않을 수도 있으니(초기 구간/카메라 드랍) 호출부에서 체크 권장.
+        동기화된 프레임 세트를 반환.
+        _capture_loop에서 이미 np.array(copy=True)로 복사하므로
+        deep copy 없이 dict 앉은 복사만 수행합니다 (46MB/sec → ~0 절감).
         """
         with self.lock:
-            return copy.deepcopy(self.synced_frames)
+            return dict(self.synced_frames)  # shallow dict copy — O(N cameras)
 
     def stop(self):
         self.running = False
@@ -414,13 +408,13 @@ class MultiRealsense:
         # Join threads
         for th in self.capture_threads.values():
             try:
-                th.join(timeout=1.0)
+                th.join(timeout=2.0)
             except Exception:
                 pass
 
         if self.sync_thread:
             try:
-                self.sync_thread.join(timeout=1.0)
+                self.sync_thread.join(timeout=2.0)
             except Exception:
                 pass
 
@@ -432,7 +426,14 @@ class MultiRealsense:
             except Exception as e:
                 logging.error(f"Failed to stop pipeline for camera {serial}: {e}")
 
-        self.capture_threads = {}
+        # 모든 참조 해제 → USB 핸들 완전 반환
+        self.pipelines.clear()
+        self.configs.clear()
+        self.aligns.clear()
+        self.filters.clear()
+        self.capture_threads.clear()
         self.sync_thread = None
         with self.lock:
-            self.synced_frames = {}
+            self.buffers.clear()
+            self.synced_frames.clear()
+        gc.collect()
