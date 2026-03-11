@@ -63,6 +63,10 @@ class H5Writer:
           - gripper_state: np.ndarray[float] (G,)
           - gripper_target: np.ndarray[float] (G,)
           - base_state: np.ndarray[float] (3,) - linear_x, linear_y, angular_z
+          - ft_sensor_right_force: np.ndarray[float] (3,) - right FT sensor force [N]
+          - ft_sensor_right_torque: np.ndarray[float] (3,) - right FT sensor torque [Nm]
+          - ft_sensor_left_force: np.ndarray[float] (3,) - left FT sensor force [N]
+          - ft_sensor_left_torque: np.ndarray[float] (3,) - left FT sensor torque [Nm]
           - head_rgb: np.ndarray[uint8] shape (H, W, 3)
           - head_rgb_ts: float  # optional; defaults to ts
           - head_depth: np.ndarray[uint16] shape (H, W)
@@ -91,6 +95,8 @@ class H5Writer:
         d_time = d_robot = d_robot_target_cart = d_robot_target_joints = None
         d_torso_target = d_right_arm_target = d_left_arm_target = None
         d_grip = d_grip_target = d_base = None
+        d_ft_right_force = d_ft_right_torque = None
+        d_ft_left_force = d_ft_left_torque = None
         idx = 0
         # 현재까지 저장된 샘플 수를 추적 (업데이트 시 사용)
         saved_sample_count = 0
@@ -195,6 +201,23 @@ class H5Writer:
                                                  dtype="f8", chunks=True, compression="gzip")
                               if bs_dim > 0 else None)
 
+                    # FT sensor datasets (3D force + 3D torque per arm)
+                    first_ft = next((s for s in batch if s.get("ft_sensor_right_force") is not None), None)
+                    if first_ft is not None:
+                        ft_dim = len(first_ft["ft_sensor_right_force"])
+                        d_ft_right_force = grp.create_dataset(
+                            "ft_sensor_right_force", shape=(0, ft_dim), maxshape=(None, ft_dim),
+                            dtype="f8", chunks=True, compression="gzip")
+                        d_ft_right_torque = grp.create_dataset(
+                            "ft_sensor_right_torque", shape=(0, ft_dim), maxshape=(None, ft_dim),
+                            dtype="f8", chunks=True, compression="gzip")
+                        d_ft_left_force = grp.create_dataset(
+                            "ft_sensor_left_force", shape=(0, ft_dim), maxshape=(None, ft_dim),
+                            dtype="f8", chunks=True, compression="gzip")
+                        d_ft_left_torque = grp.create_dataset(
+                            "ft_sensor_left_torque", shape=(0, ft_dim), maxshape=(None, ft_dim),
+                            dtype="f8", chunks=True, compression="gzip")
+
                 # ----- Lazy dataset creation for all camera groups -----
                 for cam in camera_groups:
                     if (d_cam_data[cam]['img'] is None) and batch:
@@ -269,6 +292,7 @@ class H5Writer:
                     ts_list, rp_list, rtc_list, rtj_list = [], [], [], []
                     torso_list, rarm_list, larm_list = [], [], []
                     gs_list, gs_target_list, bs_list = [], [], []
+                    ft_rf_list, ft_rt_list, ft_lf_list, ft_lt_list = [], [], [], []
 
                     for s in batch:
                         ts_list.append(float(s["ts"]))
@@ -305,6 +329,11 @@ class H5Writer:
                                 [np.nan] * d_base.shape[1]
                                 if s.get("base_state") is None else s["base_state"]
                             )
+                        if d_ft_right_force is not None:
+                            ft_rf_list.append(s.get("ft_sensor_right_force", [np.nan]*d_ft_right_force.shape[1]))
+                            ft_rt_list.append(s.get("ft_sensor_right_torque", [np.nan]*d_ft_right_torque.shape[1]))
+                            ft_lf_list.append(s.get("ft_sensor_left_force", [np.nan]*d_ft_left_force.shape[1]))
+                            ft_lt_list.append(s.get("ft_sensor_left_torque", [np.nan]*d_ft_left_torque.shape[1]))
 
                     n_new = len(ts_list)
                     d_time.resize((idx + n_new,))
@@ -345,6 +374,16 @@ class H5Writer:
                     if d_base is not None:
                         d_base.resize((idx + n_new, d_base.shape[1]))
                         d_base[idx: idx + n_new, :] = np.asarray(bs_list, dtype=np.float64)
+
+                    if d_ft_right_force is not None:
+                        d_ft_right_force.resize((idx + n_new, d_ft_right_force.shape[1]))
+                        d_ft_right_force[idx: idx + n_new, :] = np.asarray(ft_rf_list, dtype=np.float64)
+                        d_ft_right_torque.resize((idx + n_new, d_ft_right_torque.shape[1]))
+                        d_ft_right_torque[idx: idx + n_new, :] = np.asarray(ft_rt_list, dtype=np.float64)
+                        d_ft_left_force.resize((idx + n_new, d_ft_left_force.shape[1]))
+                        d_ft_left_force[idx: idx + n_new, :] = np.asarray(ft_lf_list, dtype=np.float64)
+                        d_ft_left_torque.resize((idx + n_new, d_ft_left_torque.shape[1]))
+                        d_ft_left_torque[idx: idx + n_new, :] = np.asarray(ft_lt_list, dtype=np.float64)
 
                     # ----- Update previous step's robot_target_joints with current robot_pos -----
                     # batch 처리와 관계없이 queue에 있는 업데이트 요청을 하나씩 처리
